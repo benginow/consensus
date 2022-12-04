@@ -189,7 +189,9 @@ impl Participant {
         let result: bool;
         if x < self.msg_success_prob {
             match msg {
-                Rpc::Election
+                Rpc::Election(el) => {
+                    result = self_all_nodes
+                }
             }
             result = send_all.send(pm);
         } else {
