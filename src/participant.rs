@@ -19,6 +19,7 @@ use std::thread;
 use oplog;
 use client;
 use self::crossbeam_channel::{Sender, Receiver};
+use rpc;
 
 
 /// 
@@ -167,16 +168,30 @@ impl Participant {
     // pub fn respond_to_client(msg: Message) {
 
     // }
+    
+    pub fn send_all_nodes_election(msg: rpc::RequestVote) -> bool {
+        let yea_count = 0;
+    }
 
-    pub fn send_all_nodes(msg: Rpc::SendAllEntry) -> Vec<SendAllResponse> {
+    //maybe no need to send all response
+    //return value is FAILED SEND ALL RESPONSES
+    pub fn send_all_nodes_append(msg: Rpc::AppendEntries) -> Vec<SendAllResponse> {
+        //we want to be able to deal with failure responses here
         //idk how to use channels yet hehe
+        for chan in p_to_p_txs {
+            send_timeout()
+        }
+        
     }
 
     pub fn send_all_nodes_unreliable(msg: Rpc::SendAllEntry) -> bool {
         let x: f64 = random();
         let result: bool;
         if x < self.msg_success_prob {
-            result = self_all.send(pm);
+            match msg {
+                Rpc::Election
+            }
+            result = send_all.send(pm);
         } else {
             result = false;
         }
