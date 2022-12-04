@@ -13,7 +13,7 @@ pub mod participant;
 pub mod client;
 pub mod checker;
 pub mod tpcoptions;
-use coordinator::Coordinator;
+pub mod testdata;
 use participant::Participant;
 use client::Client;
 use std::sync::{Arc};
@@ -96,7 +96,6 @@ fn register_clients(
 ///     success_prob_msg: [0.0..1.0] probability that sends succeed.
 ///
 fn register_participants(
-    coordinator: &mut Coordinator,
     n_participants: i32,
     logpathbase: &String,
     running: &Arc<AtomicBool>, 
@@ -107,13 +106,28 @@ fn register_participants(
     // register participants with coordinator (set up communication channels and sync objects)
     // add client to the vector and return the vector.
     for i in 0..n_participants {
-        let (part_to_coord_tx, part_to_coord_rx) = channel();
-        let (coord_to_part_tx, coord_to_part_rx) = channel();
+        let outgoing_txs = Vec::new(); 
+        let outgoing_rxs = Vec::new(); 
+        let incoming_txs = Vec::new(); 
+        let incoming_rxs = Vec::new(); 
+
+        for j in 0..n_participants {
+            if j == i {
+                continue;
+            }
+            
+            let (outgoing_tx, outgoing_rx) = channel();
+            let (incoming_tx, incoming_rx) = channel();
+
+            outgoing_txs.push(outgoing_tx);
+            outgoing_rxs.push(outgoing_rx);
+            incoming_txs.push(incoming_tx);
+            incoming_rxs.push(incoming_rx);
+        }
 
         let log_path = format!("{}/participant_{}.log", logpathbase, i);
-        let new_participants = Participant::new(i, "TODO".into(), part_to_coord_tx, coord_to_part_rx, log_path, running, success_prob_op, success_prob_msg);
-        participants.push(new_participants);
-        coordinator.participant_channels.push((coord_to_part_tx, part_to_coord_rx));
+        let new_participant = Participant::new(i, "TODO".into(), outgoing_txs, incoming_rxs, log_path, running, success_prob_op, success_prob_msg);
+        participants.push(new_participant);        
     }
     participants
 }

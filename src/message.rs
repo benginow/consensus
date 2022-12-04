@@ -10,6 +10,14 @@ extern crate serde_json;
 use std::sync::atomic::{AtomicI32, Ordering};
 use self::serde_json::Value;
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Request {
+    SET(u64),
+    ADD(u64),
+    GET,
+    GETLOG
+}
+
 ///
 /// MessageType
 /// Message type codes that various 2PC parties may want to send 
@@ -18,7 +26,7 @@ use self::serde_json::Value;
 /// 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageType {    
-    ClientRequest,          // Request a transaction from the coordinator
+    ClientRequest(Request),          // Request a transaction from the coordinator
     CoordinatorPropose,     // Coordinator sends propose work to clients
     ParticipantVoteCommit,  // Participant votes to commit in phase 1
     ParticipantVoteAbort,   // Participant votes to abort in phase 1

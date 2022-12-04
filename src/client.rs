@@ -1,5 +1,5 @@
 //! 
-//! client.rs
+//! client.rs 
 //! Implementation of 2PC client
 //! 
 extern crate log;
@@ -14,16 +14,18 @@ use message;
 use message::MessageType;
 use message::RequestStatus;
 
+
 // static counter for getting unique TXID numbers
 static TXID_COUNTER: AtomicI32 = AtomicI32::new(1);
 
 // client state and 
 // primitives for communicating with 
 // the coordinator
+
 #[derive(Debug)]
 pub struct Client {    
     pub id: i32,
-    is: String,
+    // is: String,
     tx: Sender<message::ProtocolMessage>,
     rx: Receiver<message::ProtocolMessage>,
     logpath: String,
@@ -60,7 +62,6 @@ impl Client {
                r: Arc<AtomicBool>) -> Client {
         Client {
             id: i,
-            is,
             tx,
             rx,
             logpath,
@@ -86,7 +87,7 @@ impl Client {
     /// send_next_operation(&mut self)
     /// send the next operation to the coordinator
     /// 
-    pub fn send_next_operation(&mut self) {
+    pub fn send_next_operation(&mut self, req: message::Request) {
 
         trace!("Client_{}::send_next_operation", self.id);
 
@@ -95,7 +96,8 @@ impl Client {
         let txid = TXID_COUNTER.fetch_add(1, Ordering::SeqCst);
 
         info!("Client {} request({})->txid:{} called", self.id, request_no, txid);
-        let pm = message::ProtocolMessage::generate(message::MessageType::ClientRequest, 
+
+        let pm = message::ProtocolMessage::generate(message::MessageType::ClientRequest(req), 
                                                     txid, 
                                                     format!("Client_{}", self.id), 
                                                     request_no);
@@ -149,15 +151,14 @@ impl Client {
     /// HINT: if you've issued all your requests, wait for some kind of
     ///       exit signal before returning from the protocol method!
     /// 
-    pub fn protocol(&mut self, n_requests: i32) {
-
+    pub fn protocol(&mut self, requests: Vec<message::Request>) {
         // run the 2PC protocol for each of n_requests
 
-        for _ in 0..n_requests {
+        for req in requests {
             if !self.r.load(Ordering::SeqCst) {
                 break
             }
-            self.send_next_operation();
+            self.send_next_operation(req);
             self.recv_result();
         }
 

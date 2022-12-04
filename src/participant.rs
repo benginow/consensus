@@ -16,6 +16,7 @@ use message;
 use std::collections::HashMap;
 use std::thread;
 use oplog;
+use client;
 
 /// 
 /// ParticipantState
@@ -23,8 +24,9 @@ use oplog;
 /// 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParticipantState {    
-    Quiescent,          
-    // TODO ...
+    Leader,
+    Follower,
+    Candidate,
 }
 
 ///
@@ -36,12 +38,15 @@ pub enum ParticipantState {
 pub struct Participant {    
     id: i32,
     state: ParticipantState,
+    //whats this lol teehee
     log: oplog::OpLog,
-    tx: Sender<message::ProtocolMessage>,
-    rx: Receiver<message::ProtocolMessage>,
+    //these should be vectors now?
+    tx: Vec<Sender<message::ProtocolMessage>>,
+    rx: Vec<Receiver<message::ProtocolMessage>>,
     op_success_prob: f64,
     msg_success_prob: f64,
     r: Arc<AtomicBool>,
+    local_log: Vec<message::Request>,
     // TODO...
 }
 
@@ -70,8 +75,8 @@ impl Participant {
     /// 
     pub fn new(
         i: i32, is: String, 
-        tx: Sender<message::ProtocolMessage>, 
-        rx: Receiver<message::ProtocolMessage>, 
+        tx: Vec<Sender<message::ProtocolMessage>>, 
+        rx: Vec<Receiver<message::ProtocolMessage>>, 
         logpath: String,
         r: &Arc<AtomicBool>,
         f_success_prob_ops: f64,
@@ -82,10 +87,11 @@ impl Participant {
             log: oplog::OpLog::new(logpath),
             op_success_prob: f_success_prob_ops,
             msg_success_prob: f_success_prob_msg,
-            state: ParticipantState::Quiescent,
+            state: ParticipantState::Follower,
             tx,
             rx,
             r: r.clone(),
+            local_log: Vec::new(),
             // TODO ... 
         }   
     }
