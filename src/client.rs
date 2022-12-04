@@ -4,7 +4,8 @@
 //! 
 extern crate log;
 extern crate stderrlog;
-use std::sync::mpsc::{Sender, Receiver};
+extern crate crossbeam_channel;
+// use std::sync::mpsc::{Sender, Receiver};
 use std::sync::atomic::{AtomicI32, AtomicBool, Ordering};
 use std::sync::{Arc};
 use std::time::Duration;
@@ -13,7 +14,7 @@ use std::collections::HashMap;
 use message;
 use message::MessageType;
 use message::RequestStatus;
-
+use self::crossbeam_channel::{Sender, Receiver};
 
 // static counter for getting unique TXID numbers
 static TXID_COUNTER: AtomicI32 = AtomicI32::new(1);
@@ -24,10 +25,10 @@ static TXID_COUNTER: AtomicI32 = AtomicI32::new(1);
 
 #[derive(Debug)]
 pub struct Client {    
-    pub id: i32,
+    pub id: usize,
     // is: String,
-    tx: Sender<message::ProtocolMessage>,
-    rx: Receiver<message::ProtocolMessage>,
+    c_to_p_txs: Vec<Option<Sender<message::ProtocolMessage>>>,
+    p_to_c_rxs: Vec<Option<Receiver<message::ProtocolMessage>>>,
     logpath: String,
     r: Arc<AtomicBool>,
     // ...
@@ -54,16 +55,16 @@ impl Client {
     /// HINT: you may want to pass some global flags that indicate whether
     ///       the protocol is still running to this constructor
     /// 
-    pub fn new(i: i32,
+    pub fn new(i: usize,
                is: String,
-               tx: Sender<message::ProtocolMessage>,
-               rx: Receiver<message::ProtocolMessage>,
+               c_to_p_txs: Vec<Option<Sender<message::ProtocolMessage>>>,
+               p_to_c_rxs: Vec<Option<Receiver<message::ProtocolMessage>>>,
                logpath: String,
                r: Arc<AtomicBool>) -> Client {
         Client {
             id: i,
-            tx,
-            rx,
+            c_to_p_txs,
+            p_to_c_rxs,
             logpath,
             r,
             // ...
@@ -103,8 +104,8 @@ impl Client {
                                                     request_no);
 
         info!("client {} calling send...", self.id);
-
-        self.tx.send(pm).unwrap();
+        // TODO
+        // self.tx.send(pm).unwrap();
 
         trace!("Client_{}::exit send_next_operation", self.id);
     }
@@ -122,10 +123,11 @@ impl Client {
 
         trace!("Client_{}::recv_result", self.id);
 
-        match self.rx.recv() {
-            Ok(v) => {println!("received {:?}", v)},
-            Err(e) => {panic!("err {}", e)}
-        }
+        // match self.rx.recv() {
+        //     Ok(v) => {println!("received {:?}", v)},
+        //     Err(e) => {panic!("err {}", e)}
+        // }
+        // TODO
 
         trace!("Client_{}::exit recv_result", self.id);
     }

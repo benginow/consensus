@@ -5,9 +5,10 @@
 extern crate log;
 extern crate stderrlog;
 extern crate rand;
+extern crate crossbeam_channel;
+use std::time;
 use participant::rand::prelude::*;
 use std::sync::mpsc;
-use std::sync::mpsc::{Sender, Receiver};
 use std::time::Duration;
 use std::sync::atomic::{AtomicI32};
 use std::sync::{Arc};
@@ -17,6 +18,8 @@ use std::collections::HashMap;
 use std::thread;
 use oplog;
 use client;
+use self::crossbeam_channel::{Sender, Receiver};
+
 
 /// 
 /// ParticipantState
@@ -27,27 +30,45 @@ pub enum ParticipantState {
     Leader,
     Follower,
     Candidate,
+    //mostly just used so that we can simulate a machine being down :)
+    Down,
 }
 
-///
-/// Participant
-/// structure for maintaining per-participant state 
-/// and communication/synchronization objects to/from coordinator
-/// 
+
+/// Node
+/// structure for maintaining per-node state 
+/// theoretically, we should go back and rename participant to node
+/// for now, this works
 #[derive(Debug)]
-pub struct Participant {    
-    id: i32,
-    state: ParticipantState,
-    //whats this lol teehee
+pub struct Participant {   
+    //miscellania
     log: oplog::OpLog,
-    //these should be vectors now?
-    tx: Vec<Sender<message::ProtocolMessage>>,
-    rx: Vec<Receiver<message::ProtocolMessage>>,
+    //will tell u to stop if u gotta stop
+    r: Arc<AtomicBool>,
+
+    //machine information
+    id: usize,
     op_success_prob: f64,
     msg_success_prob: f64,
-    r: Arc<AtomicBool>,
     local_log: Vec<message::Request>,
-    // TODO...
+    
+    //participant<->participant communication 
+    p_to_p_txs: Vec<Option<Sender<message::ProtocolMessage>>>, // for sending data to other participants
+    p_to_p_rxs: Vec<Option<Receiver<message::ProtocolMessage>>>, // for receiving data from other participants
+
+    //participant<->client communication 
+    p_to_c_txs: Vec<Option<Sender<message::ProtocolMessage>>>, // for sending data to clients
+    c_to_p_rxs: Vec<Option<Receiver<message::ProtocolMessage>>>, // for receiving data from clients
+    
+    //raft-protocol info
+    current_term: u64,
+    state: ParticipantState,
+    leader_id: i64,
+
+    //stats
+    successful_ops: u64,
+    unsuccessful_ops: u64,
+    unknown_ops: u64,
 }
 
 ///
@@ -63,8 +84,6 @@ impl Participant {
     /// 
     /// new()
     /// 
-    /// Return a new participant, ready to run the 2PC protocol
-    /// with the coordinator. 
     /// 
     /// HINT: you may want to pass some channels or other communication 
     ///       objects that enable coordinator->participant and participant->coordinator
@@ -74,9 +93,11 @@ impl Participant {
     ///       ways to communicate this, of course. 
     /// 
     pub fn new(
-        i: i32, is: String, 
-        tx: Vec<Sender<message::ProtocolMessage>>, 
-        rx: Vec<Receiver<message::ProtocolMessage>>, 
+        i: usize, is: String, 
+        p_to_p_txs: Vec<Option<Sender<message::ProtocolMessage>>>, 
+        p_to_p_rxs: Vec<Option<Receiver<message::ProtocolMessage>>>, 
+        p_to_c_txs: Vec<Option<Sender<message::ProtocolMessage>>>,
+        c_to_p_rxs: Vec<Option<Receiver<message::ProtocolMessage>>>,
         logpath: String,
         r: &Arc<AtomicBool>,
         f_success_prob_ops: f64,
@@ -88,11 +109,17 @@ impl Participant {
             op_success_prob: f_success_prob_ops,
             msg_success_prob: f_success_prob_msg,
             state: ParticipantState::Follower,
-            tx,
-            rx,
+            p_to_p_txs,
+            p_to_p_rxs,
+            p_to_c_txs,
+            c_to_p_rxs, 
             r: r.clone(),
             local_log: Vec::new(),
-            // TODO ... 
+            current_term: 0,
+            leader_id: -1,
+            successful_ops: 0,
+            unsuccessful_ops: 0,
+            unknown_ops: 0,
         }   
     }
 
@@ -134,7 +161,27 @@ impl Participant {
             result = false;
         }
         result
-    }    
+    }   
+    
+    //figure out how communicating w/ client goes.. TODO
+    // pub fn respond_to_client(msg: Message) {
+
+    // }
+
+    pub fn send_all_nodes(msg: Rpc::SendAllEntry) -> Vec<SendAllResponse> {
+        //idk how to use channels yet hehe
+    }
+
+    pub fn send_all_nodes_unreliable(msg: Rpc::SendAllEntry) -> bool {
+        let x: f64 = random();
+        let result: bool;
+        if x < self.msg_success_prob {
+            result = self_all.send(pm);
+        } else {
+            result = false;
+        }
+        result
+    }
 
     /// 
     /// perform_operation
@@ -151,22 +198,43 @@ impl Participant {
     pub fn perform_operation(&mut self, request: &Option<message::ProtocolMessage>) -> bool {
 
         trace!("participant::perform_operation");
+        match self.state {
+            Leader => {
+                //communicate with all to send request
+                //append 
+                let result = message::RequestStatus::Aborted;
+            }
+            Follower => {
+                
+                let result = message::RequestStatus::Aborted;
 
-        let mut result: message::RequestStatus = message::RequestStatus::Unknown;
-
-        let x: f64 = random();
-        if x > self.op_success_prob {
-            
-            // TODO: fail the request
-            result = message::RequestStatus::Aborted;
-        } else {
-
-            // TODO: request succeeds!
-            result = message::RequestStatus::Committed;
+                // wait 
+            }
+            Candidate => {
+                //we're in an election, so we want to abort the request until we have a leader
+                let result = message::RequestStatus::Aborted;
+            }
         }
-
         trace!("exit participant::perform_operation");
-        result == message::RequestStatus::Committed
+        result
+
+        
+
+        // let mut result: message::RequestStatus = message::RequestStatus::Unknown;
+
+        // let x: f64 = random();
+        // if x > self.op_success_prob {
+            
+        //     // TODO: fail the request
+        //     result = message::RequestStatus::Aborted;
+        // } else {
+
+        //     // TODO: request succeeds!
+        //     result = message::RequestStatus::Committed;
+        // }
+
+        
+        // result == message::RequestStatus::Committed
     }
 
     ///
@@ -177,10 +245,8 @@ impl Participant {
     pub fn report_status(&mut self) {
 
         // TODO: maintain actual stats!
-        let global_successful_ops: usize = 0;
-        let global_failed_ops: usize = 0;
-        let global_unknown_ops: usize = 0;
-        println!("participant_{}:\tC:{}\tA:{}\tU:{}", self.id, global_successful_ops, global_failed_ops, global_unknown_ops);
+        // this is based off of INDIVIDUAL NODE STATUS
+        println!("participant_{}:\tC:{}\tA:{}\tU:{}", self.id, successful_ops, failed_ops, unknown_ops);
     }
 
     ///
@@ -196,6 +262,46 @@ impl Participant {
         trace!("participant_{} exiting", self.id);
     }    
 
+    
+
+    fn follower_action(&mut self) -> ParticipantState {
+        //wait on heartbeats from leader
+        let mut rng = rand::thread_rng();
+        //make this a range
+        let rand_time: u64 = rng.gen();
+        if self.leader_id == -1 {
+            //instead of waiting on a leader, sleep for a random amount of time
+            // let timer = Timeout::new(rx[0], rand_time);
+            
+            let rand_time = gen_range(0.0...10.0);
+            let wait_duration = time::Duration::from_millis(rand_time); 
+            //wait on a candidate response for this duration 
+
+
+        }
+        else {
+            //wait on heartbeats from leader -> if no heartbeat, return and put yourself in the candidate state
+            //additionally, listen for something from client. 
+        }
+
+
+        // let heartbeat = thread::spawn(move || {
+        //     //listen on all channels for heartbeat? ugh yikes..
+            
+
+        // });
+    }
+
+    fn leader_action(&mut self) -> ParticipantState {
+        ParticipantState::Leader
+    }
+
+
+    fn candidate_action(&mut self) -> ParticipantState {
+        ParticipantState::Candidate
+    }
+
+
     ///
     /// protocol()
     /// Implements the participant side of the 2PC protocol
@@ -206,10 +312,45 @@ impl Participant {
         
         trace!("Participant_{}::protocol", self.id);
 
-        while self.r.load(Ordering::SeqCst) {   
-            let res = self.rx.recv().unwrap();
-            
+        //
+        while (true) {
+            match state {
+                Leader => { 
+                    //WILL DO THIS UNTIL IT GOES DOWN
+                    //HOW ARE WE SIMULATING GOING DOWN?
+                    //wait on client + send if client has something
+                    let client_wait = thread::spawn(move || {
+                        while true {
+                            select! {}
+
+                            //RANDOMLY GENERATE A NUMBER, IF 0 THEN GO DOWN (just exit from true and set state of follower)
+                        }
+
+                    });
+                    //send heartbeats 
+                    //
+                    let heartbeat = thread::spawn(move || {
+
+                    });
+
+                }
+                Follower => {
+                    self.state = follower_action();
+                }
+                Candidate => {
+                    
+                }
+                Down => {
+
+                }
+            }
         }
+        
+
+        // while self.r.load(Ordering::SeqCst) {   
+        //     let res = self.rx.recv().unwrap();
+            
+        // }
         
 
         self.wait_for_exit_signal();

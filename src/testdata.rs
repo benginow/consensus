@@ -1,18 +1,11 @@
 use message::Request;
-use std::collections::{HashMap};
+extern crate phf;
 
-macro_rules! collection {
-    // map-like
-    ($($k:expr => $v:expr),* $(,)?) => {{
-        core::convert::From::from([$(($k, $v),)*])
-    }};
-    // set-like
-    ($($v:expr),* $(,)?) => {{
-        core::convert::From::from([$($v,)*])
-    }};
+pub fn get_test_data(test_name: &str) -> Result<Vec<Vec<Request>>, &'static str> {
+    match test_name {
+        "0" => Ok(vec![vec![Request::GET, Request::ADD(15)]]),
+        "1" => Ok(vec![vec![Request::SET(1), Request::ADD(2), Request::GET]]),
+        "2" => Ok(vec![vec![Request::GETLOG, Request::ADD(15), Request::GETLOG]]),
+        _ => Err("invalid test name"),
+    }
 }
-
-static map: HashMap<u64, Vec<Vec<Request>>> = collection! { 0 => collection![collection![Request::GET, Request::ADD(15)]],
-                                                            1 => collection![collection![Request::SET(1), Request::ADD(2), Request::GET]],
-                                                            2 => collection![collection![Request::GETLOG, Request::ADD(15), Request::GETLOG]]}; 
-// HashMap::from();

@@ -3,21 +3,40 @@ extern crate log;
 extern crate stderrlog;
 extern crate clap;
 extern crate ctrlc;
-use std::sync::mpsc::channel;
+extern crate crossbeam_channel;
+use std::convert::TryInto;
+use std::ptr::null;
 use std::thread;
 use std::thread::JoinHandle;
 pub mod message;
 pub mod oplog;
-pub mod coordinator;
 pub mod participant;
 pub mod client;
 pub mod checker;
 pub mod tpcoptions;
 pub mod testdata;
+use message::{Request, ProtocolMessage};
 use participant::Participant;
 use client::Client;
 use std::sync::{Arc};
 use std::sync::atomic::{AtomicBool, Ordering};
+use self::crossbeam_channel::{unbounded, Receiver, Sender};
+
+fn vec_from_closure<F, T>(f: F, size: usize) -> Vec<T> where F: Fn() -> T {
+    let ret_val = Vec::with_capacity(size);
+    for i in 0..size {
+        ret_val.push(f());
+    }
+    ret_val
+}
+
+fn vec_from_idx_closure<F, T>(f: F, size: usize) -> Vec<T> where F: Fn(usize) -> T {
+    let ret_val = Vec::with_capacity(size);
+    for i in 0..size {
+        ret_val.push(f(i));
+    }
+    ret_val
+}
 
 ///
 /// register_clients()
@@ -46,24 +65,58 @@ use std::sync::atomic::{AtomicBool, Ordering};
 ///            logpathbase/client_<num>.log
 ///     running: atomic bool indicating whether the simulation is still running
 ///
-fn register_clients(
-    coordinator: &mut Coordinator,
-    n_clients: i32,
-    logpathbase: String,
-    running: &Arc<AtomicBool>) -> Vec<Client> {
-    let mut clients = vec![];
-    // register clients with coordinator (set up communication channels and sync objects)
-    // add client to the vector and return the vector.
-    for i in 0..n_clients {
-        let (client_to_coord_tx, client_to_coord_rx) = channel();
-        let (coord_to_client_tx, coord_to_client_rx) = channel();
 
-        let log_path = format!("{}/client_{}.log", logpathbase, i);
-        let new_client = Client::new(i, "TODO".into(), client_to_coord_tx, coord_to_client_rx, log_path, running.clone());
-        clients.push(new_client);
-        coordinator.client_channels.push((coord_to_client_tx, client_to_coord_rx));
+struct PartPartCommunicator {
+    txs: Vec<Vec<Option<Sender<ProtocolMessage>>>>,
+    rxs: Vec<Vec<Option<Receiver<ProtocolMessage>>>>,
+}
+
+fn create_part_part_channels(n_participants: usize) -> PartPartCommunicator {
+    let mut part_part_txs = vec_from_closure(|| vec_from_closure(|| None, n_participants), n_participants); 
+    let mut part_part_rxs = vec_from_closure(|| vec_from_closure(|| None, n_participants), n_participants); 
+
+    for src_part in 0..n_participants {
+        for dest_part in 0..n_participants {
+            if src_part == dest_part {
+                part_part_txs[src_part][dest_part] = None;
+                part_part_rxs[dest_part][src_part] = None;
+            } else {
+                let (outgoing_tx, outgoing_rx) = unbounded();
+                part_part_txs[src_part][dest_part] = Some(outgoing_tx);
+                part_part_rxs[dest_part][src_part] = Some(outgoing_rx);
+            }
+        }
     }
-    clients
+
+    PartPartCommunicator{txs: part_part_txs, rxs: part_part_rxs}
+}
+
+struct ClientPartCommunicator {
+    p_to_c_txs: Vec<Vec<Option<Sender<ProtocolMessage>>>>, // for the participants to send data to the clients
+    p_to_c_rxs: Vec<Vec<Option<Receiver<ProtocolMessage>>>>, // for the clients to receive data from the participants
+    c_to_p_txs: Vec<Vec<Option<Sender<ProtocolMessage>>>>, // for the clients to send data to the participants 
+    c_to_p_rxs: Vec<Vec<Option<Receiver<ProtocolMessage>>>>, // for the participants to receive data from the clients
+}
+
+fn create_client_part_channels(n_participants: usize, n_clients: usize) -> ClientPartCommunicator {
+    let mut p_to_c_txs = vec_from_closure(|| vec_from_closure(|| None, n_clients), n_participants); 
+    let mut p_to_c_rxs = vec_from_closure(|| vec_from_closure(|| None, n_participants), n_clients); 
+    let mut c_to_p_txs = vec_from_closure(|| vec_from_closure(|| None, n_participants), n_clients); 
+    let mut c_to_p_rxs = vec_from_closure(|| vec_from_closure(|| None, n_clients), n_participants); 
+
+    for part in 0..n_participants {
+        for client in 0..n_clients {
+            let (part_to_client_tx, part_to_client_rx) = unbounded();
+            let (client_to_part_tx, client_to_part_rx) = unbounded();
+
+            p_to_c_txs[part][client] = Some(part_to_client_tx);
+            p_to_c_rxs[client][part] = Some(part_to_client_rx);
+            c_to_p_txs[client][part] = Some(client_to_part_tx);
+            c_to_p_rxs[part][client] = Some(client_to_part_rx);
+        }
+    }
+
+    ClientPartCommunicator{p_to_c_txs, p_to_c_rxs, c_to_p_txs, c_to_p_rxs}
 }
 
 /// 
@@ -95,41 +148,48 @@ fn register_clients(
 ///     success_prob_op: [0.0..1.0] probability that operations succeed.
 ///     success_prob_msg: [0.0..1.0] probability that sends succeed.
 ///
-fn register_participants(
-    n_participants: i32,
+fn register_participants_and_clients(
+    n_participants: usize,
+    n_clients: usize,
     logpathbase: &String,
     running: &Arc<AtomicBool>, 
     success_prob_op: f64,
-    success_prob_msg: f64) -> Vec<Participant> {
+    success_prob_msg: f64) -> (Vec<Participant>, Vec<Client>) {
 
-    let mut participants = vec![];
+    let mut participants = Vec::with_capacity(n_participants);
+    let mut clients = Vec::with_capacity(n_clients);
+
     // register participants with coordinator (set up communication channels and sync objects)
     // add client to the vector and return the vector.
-    for i in 0..n_participants {
-        let outgoing_txs = Vec::new(); 
-        let outgoing_rxs = Vec::new(); 
-        let incoming_txs = Vec::new(); 
-        let incoming_rxs = Vec::new(); 
 
-        for j in 0..n_participants {
-            if j == i {
-                continue;
-            }
-            
-            let (outgoing_tx, outgoing_rx) = channel();
-            let (incoming_tx, incoming_rx) = channel();
+    // initialize participant-participant communication
+    let p_p_comm = create_part_part_channels(n_participants);
+    // initialize client<->participant communication
+    let p_c_comm = create_client_part_channels(n_participants, n_clients);
 
-            outgoing_txs.push(outgoing_tx);
-            outgoing_rxs.push(outgoing_rx);
-            incoming_txs.push(incoming_tx);
-            incoming_rxs.push(incoming_rx);
-        }
-
+    for i in (0..n_participants).rev() { // remove backwards
         let log_path = format!("{}/participant_{}.log", logpathbase, i);
-        let new_participant = Participant::new(i, "TODO".into(), outgoing_txs, incoming_rxs, log_path, running, success_prob_op, success_prob_msg);
+        let new_participant = Participant::new(
+            i, 
+            "TODO".into(), 
+            p_p_comm.txs.remove(i), 
+            p_p_comm.rxs.remove(i), 
+            p_c_comm.p_to_c_txs.remove(i),
+            p_c_comm.c_to_p_rxs.remove(i),
+            log_path, 
+            running, 
+            success_prob_op, 
+            success_prob_msg,
+        );
         participants.push(new_participant);        
     }
-    participants
+
+    for i in (0..n_clients).rev() {
+        let log_path = format!("{}/client_{}.log", logpathbase, i);
+        let new_client = Client::new(i, "TODO".into(), p_c_comm.c_to_p_txs.remove(i), p_c_comm.p_to_c_rxs.remove(i), log_path, running.clone());
+    }
+
+    (participants, clients)
 }
 
 ///
@@ -147,11 +207,12 @@ fn register_participants(
 ///
 fn launch_clients(
     clients: Vec<Client>,
-    n_requests: i32,
+    requests: Vec<Vec<message::Request>>,
     handles: &mut Vec<JoinHandle<()>>) {
-    for mut client in clients {
+    for (i, mut client) in clients.into_iter().enumerate() {
+        let data = requests.get(i).unwrap().to_vec();
         handles.push(thread::spawn(move || {
-            client.protocol(n_requests);
+            client.protocol(data);
         }));
     }
 }
@@ -216,17 +277,15 @@ fn run(opts: & tpcoptions::TPCOptions) {
     // create a coordinator, create and register clients and participants
     // launch threads for all, and wait on handles. 
     let cpath = format!("{}{}", opts.logpath, "coordinator.log");
-    let mut coordinator = Coordinator::new(cpath, &running, opts.success_probability_msg);
 
-    let clients = register_clients(&mut coordinator, opts.num_clients, opts.logpath.clone(), &running);
-    let participants = register_participants(&mut coordinator, opts.num_participants, &opts.logpath, &running, opts.success_probability_ops, opts.success_probability_msg);
+    let (participants, clients) = register_participants_and_clients(opts.num_participants, opts.num_clients.try_into().unwrap(), &opts.logpath, &running, opts.success_probability_ops, opts.success_probability_msg);
 
-    launch_clients(clients, opts.num_requests, &mut handles);
+    let test_data = testdata::get_test_data(&opts.test_name);
+    if let Err(e) = test_data {
+        panic!("{}", e);
+    }
     launch_participants(participants, &mut handles);
-
-    handles.push(thread::spawn(move || {
-        coordinator.protocol();
-    }));
+    launch_clients(clients, test_data.unwrap().clone(), &mut handles);
 
     // wait for clients, participants, and coordinator here...
     for handle in handles {
@@ -252,7 +311,7 @@ fn main() {
 
         "run" => run(&opts),
         "check" => checker::check_last_run(opts.num_clients, 
-                                        opts.num_requests, 
+                            testdata::get_test_data(&opts.test_name).unwrap().len().try_into().unwrap(), 
                                         opts.num_participants, 
                                         &opts.logpath.to_string()),
         _ => panic!("unknown mode"),

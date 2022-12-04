@@ -107,7 +107,7 @@ fn check_participant(
 pub fn check_last_run(
     n_clients: i32,
     n_requests: i32, 
-    n_participants: i32, 
+    n_participants: usize, 
     logpathbase: &String) {
 
         info!("Checking 2PC run:  {} requests * {} clients, {} participants", 
