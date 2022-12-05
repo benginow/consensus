@@ -15,7 +15,8 @@ pub mod client;
 pub mod checker;
 pub mod tpcoptions;
 pub mod testdata;
-use message::{Request, ProtocolMessage};
+pub mod constants;
+use message::{ClientRequest, ParticipantResponse};
 use participant::Participant;
 use client::Client;
 use std::sync::{Arc};
@@ -23,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use self::crossbeam_channel::{unbounded, Receiver, Sender};
 
 fn vec_from_closure<F, T>(f: F, size: usize) -> Vec<T> where F: Fn() -> T {
-    let ret_val = Vec::with_capacity(size);
+    let mut ret_val = Vec::with_capacity(size);
     for i in 0..size {
         ret_val.push(f());
     }
@@ -31,7 +32,7 @@ fn vec_from_closure<F, T>(f: F, size: usize) -> Vec<T> where F: Fn() -> T {
 }
 
 fn vec_from_idx_closure<F, T>(f: F, size: usize) -> Vec<T> where F: Fn(usize) -> T {
-    let ret_val = Vec::with_capacity(size);
+    let mut ret_val = Vec::with_capacity(size);
     for i in 0..size {
         ret_val.push(f(i));
     }
@@ -67,8 +68,8 @@ fn vec_from_idx_closure<F, T>(f: F, size: usize) -> Vec<T> where F: Fn(usize) ->
 ///
 
 struct PartPartCommunicator {
-    txs: Vec<Vec<Option<Sender<ProtocolMessage>>>>,
-    rxs: Vec<Vec<Option<Receiver<ProtocolMessage>>>>,
+    txs: Vec<Vec<Option<Sender<message::RPC>>>>,
+    rxs: Vec<Vec<Option<Receiver<message::RPC>>>>,
 }
 
 fn create_part_part_channels(n_participants: usize) -> PartPartCommunicator {
@@ -92,10 +93,10 @@ fn create_part_part_channels(n_participants: usize) -> PartPartCommunicator {
 }
 
 struct ClientPartCommunicator {
-    p_to_c_txs: Vec<Vec<Option<Sender<ProtocolMessage>>>>, // for the participants to send data to the clients
-    p_to_c_rxs: Vec<Vec<Option<Receiver<ProtocolMessage>>>>, // for the clients to receive data from the participants
-    c_to_p_txs: Vec<Vec<Option<Sender<ProtocolMessage>>>>, // for the clients to send data to the participants 
-    c_to_p_rxs: Vec<Vec<Option<Receiver<ProtocolMessage>>>>, // for the participants to receive data from the clients
+    p_to_c_txs: Vec<Vec<Option<Sender<message::PtcMessage>>>>, // for the participants to send data to the clients
+    p_to_c_rxs: Vec<Vec<Option<Receiver<message::PtcMessage>>>>, // for the clients to receive data from the participants
+    c_to_p_txs: Vec<Vec<Option<Sender<message::PtcMessage>>>>, // for the clients to send data to the participants 
+    c_to_p_rxs: Vec<Vec<Option<Receiver<message::PtcMessage>>>>, // for the participants to receive data from the clients
 }
 
 fn create_client_part_channels(n_participants: usize, n_clients: usize) -> ClientPartCommunicator {
@@ -148,11 +149,11 @@ fn create_client_part_channels(n_participants: usize, n_clients: usize) -> Clien
 ///     success_prob_op: [0.0..1.0] probability that operations succeed.
 ///     success_prob_msg: [0.0..1.0] probability that sends succeed.
 ///
-fn register_participants_and_clients(
+fn register_participants_and_clients<'a>(
     n_participants: usize,
     n_clients: usize,
     logpathbase: &String,
-    running: &Arc<AtomicBool>, 
+    running: &'a Arc<AtomicBool>, 
     success_prob_op: f64,
     success_prob_msg: f64) -> (Vec<Participant>, Vec<Client>) {
 
@@ -163,9 +164,9 @@ fn register_participants_and_clients(
     // add client to the vector and return the vector.
 
     // initialize participant-participant communication
-    let p_p_comm = create_part_part_channels(n_participants);
+    let mut p_p_comm = create_part_part_channels(n_participants);
     // initialize client<->participant communication
-    let p_c_comm = create_client_part_channels(n_participants, n_clients);
+    let mut p_c_comm = create_client_part_channels(n_participants, n_clients);
 
     for i in (0..n_participants).rev() { // remove backwards
         let log_path = format!("{}/participant_{}.log", logpathbase, i);
@@ -207,7 +208,7 @@ fn register_participants_and_clients(
 ///
 fn launch_clients(
     clients: Vec<Client>,
-    requests: Vec<Vec<message::Request>>,
+    requests: Vec<Vec<message::PtcMessage>>,
     handles: &mut Vec<JoinHandle<()>>) {
     for (i, mut client) in clients.into_iter().enumerate() {
         let data = requests.get(i).unwrap().to_vec();

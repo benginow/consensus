@@ -1,11 +1,13 @@
-use message::Request;
+use message::PtcMessage;
+use message::ClientRequest::{GET, SET, ADD};
+
 extern crate phf;
 
-pub fn get_test_data(test_name: &str) -> Result<Vec<Vec<Request>>, &'static str> {
+pub fn get_test_data(test_name: &str) -> Result<Vec<Vec<PtcMessage>>, &'static str> {
     match test_name {
-        "0" => Ok(vec![vec![Request::GET, Request::ADD(15)]]),
-        "1" => Ok(vec![vec![Request::SET(1), Request::ADD(2), Request::GET]]),
-        "2" => Ok(vec![vec![Request::GETLOG, Request::ADD(15), Request::GETLOG]]),
+        "0" => Ok(vec![vec![PtcMessage::ClientRequest(GET), PtcMessage::ClientRequest(ADD(15))]]),
+        "1" => Ok(vec![vec![PtcMessage::ClientRequest(SET(1)), PtcMessage::ClientRequest(ADD(2)), PtcMessage::ClientRequest(GET)]]),
+        "2" => Ok(vec![vec![PtcMessage::ClientRequest(GET), PtcMessage::ClientRequest(ADD(15)), PtcMessage::ClientRequest(GET)]]),
         _ => Err("invalid test name"),
     }
 }

@@ -5,15 +5,15 @@
 extern crate log;
 extern crate stderrlog;
 extern crate crossbeam_channel;
+extern crate rand;
 // use std::sync::mpsc::{Sender, Receiver};
 use std::sync::atomic::{AtomicI32, AtomicBool, Ordering};
 use std::sync::{Arc};
 use std::time::Duration;
 use std::thread;
+use client::rand::prelude::*;
 use std::collections::HashMap;
 use message;
-use message::MessageType;
-use message::RequestStatus;
 use self::crossbeam_channel::{Sender, Receiver};
 
 // static counter for getting unique TXID numbers
@@ -27,8 +27,8 @@ static TXID_COUNTER: AtomicI32 = AtomicI32::new(1);
 pub struct Client {    
     pub id: usize,
     // is: String,
-    c_to_p_txs: Vec<Option<Sender<message::ProtocolMessage>>>,
-    p_to_c_rxs: Vec<Option<Receiver<message::ProtocolMessage>>>,
+    c_to_p_txs: Vec<Option<Sender<message::PtcMessage>>>,
+    p_to_c_rxs: Vec<Option<Receiver<message::PtcMessage>>>,
     logpath: String,
     r: Arc<AtomicBool>,
     // ...
@@ -57,8 +57,8 @@ impl Client {
     /// 
     pub fn new(i: usize,
                is: String,
-               c_to_p_txs: Vec<Option<Sender<message::ProtocolMessage>>>,
-               p_to_c_rxs: Vec<Option<Receiver<message::ProtocolMessage>>>,
+               c_to_p_txs: Vec<Option<Sender<message::PtcMessage>>>,
+               p_to_c_rxs: Vec<Option<Receiver<message::PtcMessage>>>,
                logpath: String,
                r: Arc<AtomicBool>) -> Client {
         Client {
@@ -84,11 +84,16 @@ impl Client {
         trace!("Client_{} exiting", self.id);
     }
 
+    fn select_dest_node(&self) -> usize {
+        let rand = rand::thread_rng().gen_range(0..self.c_to_p_txs.len()); 
+        return rand;
+    }
+
     /// 
     /// send_next_operation(&mut self)
     /// send the next operation to the coordinator
     /// 
-    pub fn send_next_operation(&mut self, req: message::Request) {
+    pub fn send_next_operation(&mut self, req: message::PtcMessage, dest_node: usize) -> Result<Option<u64>, String> {
 
         trace!("Client_{}::send_next_operation", self.id);
 
@@ -98,38 +103,26 @@ impl Client {
 
         info!("Client {} request({})->txid:{} called", self.id, request_no, txid);
 
-        let pm = message::ProtocolMessage::generate(message::MessageType::ClientRequest(req), 
-                                                    txid, 
-                                                    format!("Client_{}", self.id), 
-                                                    request_no);
-
         info!("client {} calling send...", self.id);
-        // TODO
-        // self.tx.send(pm).unwrap();
-
-        trace!("Client_{}::exit send_next_operation", self.id);
-    }
-
-    ///
-    /// recv_result()
-    /// Wait for the coordinator to respond with the result for the 
-    /// last issued request. Note that we assume the coordinator does 
-    /// not fail in this simulation
-    /// 
-    pub fn recv_result(&mut self) {
-        if !self.r.load(Ordering::SeqCst) {
-            return
+        self.c_to_p_txs[dest_node].clone().unwrap().send(req.clone()).unwrap();
+        match self.p_to_c_rxs[dest_node].clone().unwrap().recv() {
+            Ok(message::PtcMessage::ParticipantResponse(message::ParticipantResponse::SUCCESS(o))) => {
+                Ok(o)
+            },
+            Ok(message::PtcMessage::ParticipantResponse(message::ParticipantResponse::LEADER(leader_id))) => {
+                if leader_id < 0 {
+                    Err("leader ID was -1".into())
+                } else {
+                    self.send_next_operation(req.clone(), leader_id as usize)
+                }
+            },
+            Ok(_) => {
+                Err("received invalid message from participant".into())
+            },
+            Err(e) => {
+                Err(e.to_string()) // TODO: not nice
+            },
         }
-
-        trace!("Client_{}::recv_result", self.id);
-
-        // match self.rx.recv() {
-        //     Ok(v) => {println!("received {:?}", v)},
-        //     Err(e) => {panic!("err {}", e)}
-        // }
-        // TODO
-
-        trace!("Client_{}::exit recv_result", self.id);
     }
 
     ///
@@ -153,15 +146,14 @@ impl Client {
     /// HINT: if you've issued all your requests, wait for some kind of
     ///       exit signal before returning from the protocol method!
     /// 
-    pub fn protocol(&mut self, requests: Vec<message::Request>) {
+    pub fn protocol(&mut self, requests: Vec<message::PtcMessage>) {
         // run the 2PC protocol for each of n_requests
 
         for req in requests {
             if !self.r.load(Ordering::SeqCst) {
                 break
             }
-            self.send_next_operation(req);
-            self.recv_result();
+            self.send_next_operation(req, self.select_dest_node());
         }
 
         // wait for signal to exit
