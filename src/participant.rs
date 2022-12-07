@@ -137,17 +137,27 @@ impl<'a> Participant {
         selector
     }
 
-    pub fn get_c_to_p_wait_all(c_to_p_rxs: &'a Vec<Option<Receiver<message::PtcMessage>>>) -> Select<'a> {
+    pub fn get_c_to_p_wait_all(c_to_p_rxs: &'a Vec<Option<Receiver<message::PtcMessage>>>) -> (Select<'a>, Vec<&Receiver<message::PtcMessage>>) {
         let mut selector = Select::new();
+        let mut refs = Vec::new();
         for rx in c_to_p_rxs.iter() {
             match rx {
                 Some(rx) => {
                     selector.recv(rx);
+                    refs.push(rx);
                 }
                 None => continue,
             }
         }
-        selector
+        (selector, refs)
+    }
+
+    pub fn get_prev_log_term(&self) -> Option<message::ClientRequest> {
+        if self.local_log.len() > 0 {
+            Some(self.local_log[self.local_log.len() - 1].0)
+        } else {
+            None
+        }
     }
 
     //send response to client
@@ -255,8 +265,8 @@ impl<'a> Participant {
                             let append_entry = message::AppendEntries {
                                 term: self.current_term,
                                 leader_id: self.leader_id,
-                                prev_log_index: self.local_log.len() - 1,
-                                prev_log_term: self.local_log[self.local_log.len() - 1].0,
+                                prev_log_index: (self.local_log.len() as i64) - 1,
+                                prev_log_term: self.get_prev_log_term(),
                                 heartbeat: false,
                                 leader_commit: self.local_log.len(),
                                 entries: Some(*c),
@@ -284,7 +294,7 @@ impl<'a> Participant {
                                     if indix >= self.id {
                                         indix += 1;
                                     }
-                                    let resp = (self.p_to_p_rxs)[indix].clone().unwrap().recv();
+                                    let resp = index.recv(&(self.p_to_p_rxs)[indix].clone().unwrap());
                                     match resp {
                                         Ok(rpc) => {
                                             match rpc {
@@ -390,7 +400,7 @@ impl<'a> Participant {
                     if indix >= self.id {
                         indix += 1;
                     }
-                    let resp = (self.p_to_p_rxs)[indix].clone().unwrap().recv();
+                    let resp = index.recv(&(self.p_to_p_rxs)[indix].clone().unwrap());
                     match resp {
                         Ok(message::RPC::ElectionResp(er)) => {
                             if er.vote_granted {
@@ -440,8 +450,8 @@ impl<'a> Participant {
                         // TODO: we must update state 
                         if !ae.heartbeat { // must be a request for a vote on a client request if not a heartbeat
                             let success = ae.leader_id == self.leader_id &&
-                                ae.prev_log_index == self.local_log.len() - 1 &&
-                                ae.prev_log_term == self.local_log[self.local_log.len() - 1].0 &&
+                                ae.prev_log_index == (self.local_log.len() as i64) - 1 &&
+                                ae.prev_log_term == self.get_prev_log_term() &&
                                 ae.term == self.current_term;
 
                             self.p_to_p_txs[self.leader_id as usize].clone().unwrap().send(
@@ -473,14 +483,14 @@ impl<'a> Participant {
                             indix = indix + 1;
                         }
                         //scary unwrap
-                        let msg = self.p_to_p_rxs[indix].clone().unwrap().recv();
+                        let msg = index.recv(&self.p_to_p_rxs[indix].clone().unwrap());
                         match msg {
                             Ok(message::RPC::Election(e)) => {
                                 
                                 let resp = message::RequestVoteResponse{term: self.current_term,
                                                                 vote_granted: e.term < self.current_term};
                                 let send_resp = message::RPC::ElectionResp(resp);
-                                self.p_to_p_txs[indix].clone().unwrap().send(send_resp);
+                                self.p_to_p_txs[indix].clone().unwrap().send(send_resp).unwrap();
                                 //dont want to handle client stuff until leader is established...?
                                 continue;
                             }
@@ -504,11 +514,12 @@ impl<'a> Participant {
             }
 
             // LISTEN ON CLIENTS, IF A CLIENT MISDIRECTS A MESSAGE, SEND LEADER ID
-            let mut listen_to_me = Self::get_c_to_p_wait_all(&self.c_to_p_rxs);
+            let (mut listen_to_me, refs) = Self::get_c_to_p_wait_all(&self.c_to_p_rxs);
             let msg = listen_to_me.select_timeout(Duration::from_millis(constants::FOLLOWER_TIMEOUT_MS));
             match msg {
-                Ok(index) => {
-                    // let msg = self.c_to_p_rxs[index].clone().recv();
+                Ok(so) => {
+                    let idx = so.index();
+                    let msg = so.recv(&self.c_to_p_rxs[idx].clone().unwrap());
                 }
                 Err(_) => {
                     print!("tooth");
@@ -585,17 +596,18 @@ impl<'a> Participant {
         while self.r.load(Ordering::SeqCst) {
             // wait to receive from any of the clients (selector), with a timeout
             let c_to_p_rxs_clone = self.c_to_p_rxs.clone();
-            let select_res = Self::
-                get_c_to_p_wait_all(&c_to_p_rxs_clone)
-                .select_timeout(Duration::from_millis(
+            let (mut selector , refs) = Self::
+                get_c_to_p_wait_all(&c_to_p_rxs_clone);
+            let select_res = selector.select_timeout(Duration::from_millis(
                     constants::LEADER_CLIENT_REQ_TIMEOUT_MS,
                 ));
             let should_send_heartbeat = match select_res {
                 Ok(op) => {
                     // received client request, so action it
-                    match self.c_to_p_rxs[op.index()].clone().unwrap().recv() {
+                    let idx = op.index();
+                    match op.recv(refs[idx]) {
                         Ok(req) => {
-                            self.perform_operation(&Some(req), op.index());
+                            self.perform_operation(&Some(req), idx);
                             false
                         },
                         Err(e) => {
@@ -611,9 +623,13 @@ impl<'a> Participant {
             if should_send_heartbeat {
                 self.send_all_nodes_unreliable(message::RPC::Request(message::AppendEntries{
                     term: self.current_term, 
-                    prev_log_index: self.local_log.len() - 1,
+                    prev_log_index: (self.local_log.len() as i64) - 1,
                     leader_id: self.leader_id,
-                    prev_log_term: self.local_log[self.local_log.len() - 1].0,
+                    prev_log_term: if self.local_log.len() > 0 { 
+                        Some(self.local_log[self.local_log.len() - 1].0)
+                    } else {
+                        None
+                    },
                     entries: None,
                     heartbeat: true,
                     leader_commit: self.local_log.len(),
