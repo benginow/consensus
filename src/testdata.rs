@@ -8,6 +8,14 @@ pub fn get_test_data(test_name: &str) -> Result<Vec<Vec<PtcMessage>>, &'static s
         "0" => Ok(vec![vec![
             PtcMessage::ClientRequest(GET),
             PtcMessage::ClientRequest(ADD(15)),
+        ],
+        vec![
+            PtcMessage::ClientRequest(GET),
+            PtcMessage::ClientRequest(ADD(15)),
+        ],
+        vec![
+            PtcMessage::ClientRequest(GET),
+            PtcMessage::ClientRequest(ADD(15)),
         ]]),
         "1" => Ok(vec![vec![
             PtcMessage::ClientRequest(SET(1)),

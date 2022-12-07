@@ -22,6 +22,8 @@ extern crate shellexpand;
 extern crate stderrlog;
 use clap::{App, Arg};
 
+use crate::testdata;
+
 #[derive(Clone, Debug)]
 pub struct TPCOptions {
     pub success_probability_ops: f64, // probability that an operation succeeds
@@ -43,7 +45,6 @@ impl TPCOptions {
     ///
     pub fn new() -> TPCOptions {
         let default_n_participants = "3";
-        let default_n_clients = "3";
         let default_test_name = "0";
         let default_verbosity = "0";
         let default_mode = "run";
@@ -69,13 +70,6 @@ impl TPCOptions {
                     .required(false)
                     .takes_value(true)
                     .help("probability participants successfully send messages"),
-            )
-            .arg(
-                Arg::with_name("num_clients")
-                    .short("c")
-                    .required(false)
-                    .takes_value(true)
-                    .help("number of clients making requests"),
             )
             .arg(
                 Arg::with_name("test_name")
@@ -130,16 +124,12 @@ impl TPCOptions {
             .unwrap_or(default_n_participants)
             .parse::<usize>()
             .unwrap();
-        let n_clients = matches
-            .value_of("num_clients")
-            .unwrap_or(default_n_clients)
-            .parse::<i32>()
-            .unwrap();
         let test_name = matches
             .value_of("test_name")
             .unwrap_or(default_test_name)
             .parse::<String>()
             .unwrap();
+        let n_clients = testdata::get_test_data(&test_name).unwrap().len() as i32;
         let _verbosity = matches
             .value_of("verbose")
             .unwrap_or(default_verbosity)

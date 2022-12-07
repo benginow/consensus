@@ -23,6 +23,7 @@ use std::thread;
 use std::time;
 use std::time::Duration;
 
+static DEBUG: bool = true;
 ///
 /// ParticipantState
 /// enum for participant 2PC state machine
@@ -176,7 +177,7 @@ impl<'a> Participant {
     //send response to client
     pub fn send_client(&mut self, msg: message::PtcMessage, id: usize) -> bool {
         // send message to client saying whether we have aborted or not
-        self.p_to_c_txs[id].clone().unwrap().send(msg);
+        self.p_to_c_txs[id].clone().unwrap().send_timeout(msg, Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS)).unwrap();
         true
     }
 
@@ -198,7 +199,9 @@ impl<'a> Participant {
                 for i in self.p_to_p_txs.iter() {
                     match i {
                         Some(tx) => {
-                            tx.send(msg.clone());
+                            if let Err(_) = tx.send_timeout(msg.clone(), Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS)) {
+                                return Ok(false); // TODO: return count of nodes it actually went to? so we know how mnay requests to wait for?
+                            }
                         }
                         None => continue,
                     }
@@ -211,7 +214,9 @@ impl<'a> Participant {
                     match i {
                         Some(tx) => {
                             // TODO: help me finny :D
-                            tx.send(msg.clone());
+                            if let Err(_) = tx.send_timeout(msg.clone(), Duration::from_millis(constants::LEADER_APPEND_ENTRIES_TIMEOUT_MS)) {
+                                return Ok(false);
+                            }
                         }
                         None => continue,
                     }
@@ -311,7 +316,11 @@ impl<'a> Participant {
 
                             match i {
                                 Some(channel) => {
-                                    channel.send(message::RPC::Request(append_entry));
+                                    // I think this is the right constant in this case, but correct me if I am wrong!
+                                    if let Err(_) = channel.send_timeout(message::RPC::Request(append_entry), Duration::from_millis(constants::LEADER_APPEND_ENTRIES_TIMEOUT_MS)) {
+                                        // do nothing.
+                                        ()
+                                    }
                                 }
                                 None => continue,
                             }
@@ -362,7 +371,11 @@ impl<'a> Participant {
                                         message::ParticipantResponse::ABORT,
                                     );
                                     //make sure unwrap doesn't panic
-                                    self.p_to_c_txs[client_id].clone().unwrap().send(result);
+                                    if let Err(_) = self.p_to_c_txs[client_id].clone().unwrap().send_timeout(result, Duration::from_millis(constants::RESPOND_TO_CLIENTS_TIMEOUT)) {
+                                        // do nothing again? what do we even do if a client is down... idk
+                                        if DEBUG { print!("communication with clients has failed"); }
+                                        ()
+                                    }
                                     return false;
                                 }
                             }
@@ -398,7 +411,7 @@ impl<'a> Participant {
                     _ => (),
                 }
                 trace!("exit participant::perform_operation");
-                self.p_to_c_txs[client_id].clone().unwrap().send(result);
+                self.send_client_unreliable(result, client_id);
                 return operation_completed;
             }
             _ => false,
@@ -416,7 +429,7 @@ impl<'a> Participant {
             match i {
                 Some(tx) => {
                     // create RequestVote
-                    tx.send(message::RPC::Election(vote_me.clone())).unwrap();
+                    tx.send_timeout(message::RPC::Election(vote_me.clone()), Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS)).unwrap();
                 }
                 None => {
                     continue;
@@ -488,10 +501,10 @@ impl<'a> Participant {
                             self.p_to_p_txs[self.leader_id as usize]
                                 .clone()
                                 .unwrap()
-                                .send(message::RPC::RequestResp(message::AppendEntriesResponse {
+                                .send_timeout(message::RPC::RequestResp(message::AppendEntriesResponse {
                                     term: self.current_term,
                                     success,
-                                }))
+                                }), Duration::from_millis(constants::FOLLOWER_TO_LEADER_COMM))
                                 .unwrap();
                         }
                     }
@@ -531,7 +544,7 @@ impl<'a> Participant {
                                 self.p_to_p_txs[chan_index]
                                     .clone()
                                     .unwrap()
-                                    .send(send_resp)
+                                    .send_timeout(send_resp, Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS))
                                     .unwrap();
                                 //dont want to handle client stuff until leader is established...?
                                 continue;
@@ -671,9 +684,10 @@ impl<'a> Participant {
     //shit that kind of does not matter that much
     pub fn report_status(&self) {
         println!(
-            "participant_{}:\tC:{}\tA:{}\tU:{}",
-            self.id, self.successful_ops, self.unsuccessful_ops, self.unknown_ops
+            "participant_{}:\tC:{}\tA:{}\tU:{}\tLEADER:{}\tSTATE:{:?}",
+            self.id, self.successful_ops, self.unsuccessful_ops, self.unknown_ops, self.leader_id, self.state,
         );
+        
     }
 
     pub fn wait_for_exit_signal(&mut self) {

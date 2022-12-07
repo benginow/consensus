@@ -6,12 +6,15 @@ extern crate crossbeam_channel;
 extern crate log;
 extern crate rand;
 extern crate stderrlog;
+use crate::constants;
+
 // use std::sync::mpsc::{Sender, Receiver};
 use self::crossbeam_channel::{Receiver, Sender};
 use client::rand::prelude::*;
 use message;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 // static counter for getting unique TXID numbers
 static TXID_COUNTER: AtomicI32 = AtomicI32::new(1);
@@ -100,9 +103,11 @@ impl Client {
         &mut self,
         req: message::PtcMessage,
         dest_node: usize,
-    ) -> Result<Option<u64>, String> {
+    ) -> Option<Result<Option<u64>, String>> {
         trace!("Client_{}::send_next_operation", self.id);
-
+        if !self.r.load(Ordering::SeqCst) {
+            return None;
+        }
         // create a new request with a unique TXID.
         let request_no: i32 = 0; // TODO--choose another number!
         let txid = TXID_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -113,23 +118,24 @@ impl Client {
         );
 
         info!("client {} calling send...", self.id);
-        self.c_to_p_txs[dest_node]
+        if let Err(_) = self.c_to_p_txs[dest_node]
             .clone()
             .unwrap()
-            .send(req.clone())
-            .unwrap();
-        match self.p_to_c_rxs[dest_node].clone().unwrap().recv() {
+            .send_timeout(req.clone(), Duration::from_millis(constants::CLIENT_OUTGOING_REQUEST_TIMEOUT_MS)) {
+            return self.send_next_operation(req, self.select_dest_node());
+        }
+        match self.p_to_c_rxs[dest_node].clone().unwrap().recv_timeout(Duration::from_millis(constants::CLIENT_INCOMING_RESPONSE_TIMEOUT_MS)) {
             Ok(message::PtcMessage::ParticipantResponse(
                 message::ParticipantResponse::SUCCESS(o),
             )) => {
                 self.successful_ops = self.successful_ops + 1;
-                Ok(o)
+                Some(Ok(o))
             }
             Ok(message::PtcMessage::ParticipantResponse(message::ParticipantResponse::LEADER(
                 leader_id,
             ))) => {
                 if leader_id < 0 {
-                    Err("leader ID was -1".into())
+                    Some(Err("leader ID was -1".into()))
                 } else {
                     self.send_next_operation(req.clone(), leader_id as usize)
                 }
@@ -140,11 +146,10 @@ impl Client {
             }
             Ok(_) => {
                 self.unknown_ops = self.unknown_ops + 1;
-                Err("received invalid message from participant".into())
+                Some(Err("received invalid message from participant".into()))
             }
-
             Err(e) => {
-                Err(e.to_string()) // TODO: not nice
+                Some(Err(e.to_string())) // TODO: not nice
             }
         }
     }
@@ -174,11 +179,18 @@ impl Client {
         // run the 2PC protocol for each of n_requests
 
         for req in requests {
+            let mut ret_val = None;
             if !self.r.load(Ordering::SeqCst) {
                 break;
             }
-            self.send_next_operation(req, self.select_dest_node())
-                .unwrap();
+            
+            while let None = ret_val {
+                // println!("next req {:?}", req);
+                if !self.r.load(Ordering::SeqCst) {
+                    break;
+                }
+                ret_val = self.send_next_operation(req.clone(), self.select_dest_node());
+            }
         }
 
         // wait for signal to exit
