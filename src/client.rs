@@ -31,6 +31,9 @@ pub struct Client {
     p_to_c_rxs: Vec<Option<Receiver<message::PtcMessage>>>,
     logpath: String,
     r: Arc<AtomicBool>,
+    successful_ops: usize,
+    failed_ops: usize, 
+    unknown_ops: usize,
     // ...
 }
 
@@ -67,6 +70,9 @@ impl Client {
             p_to_c_rxs,
             logpath,
             r,
+            successful_ops: 0,
+            failed_ops: 0,
+            unknown_ops: 0,
             // ...
         }   
     }
@@ -107,6 +113,7 @@ impl Client {
         self.c_to_p_txs[dest_node].clone().unwrap().send(req.clone()).unwrap();
         match self.p_to_c_rxs[dest_node].clone().unwrap().recv() {
             Ok(message::PtcMessage::ParticipantResponse(message::ParticipantResponse::SUCCESS(o))) => {
+                self.successful_ops = self.successful_ops + 1;
                 Ok(o)
             },
             Ok(message::PtcMessage::ParticipantResponse(message::ParticipantResponse::LEADER(leader_id))) => {
@@ -116,9 +123,15 @@ impl Client {
                     self.send_next_operation(req.clone(), leader_id as usize)
                 }
             },
-            Ok(_) => {
-                Err("received invalid message from participant".into())
+            Ok(message::PtcMessage::ParticipantResponse(message::ParticipantResponse::ABORT)) => {
+                self.failed_ops = self.failed_ops + 1;
+                self.send_next_operation(req.clone(), dest_node)
             },
+            Ok(_) => {
+                self.unknown_ops = self.unknown_ops + 1;
+                Err("received invalid message from participant".into())
+            }
+
             Err(e) => {
                 Err(e.to_string()) // TODO: not nice
             },
@@ -133,10 +146,8 @@ impl Client {
     pub fn report_status(&mut self) {
 
         // TODO: collect real stats!
-        let successful_ops: usize = 0;
-        let failed_ops: usize = 0; 
-        let unknown_ops: usize = 0; 
-        println!("Client_{}:\tC:{}\tA:{}\tU:{}", self.id, successful_ops, failed_ops, unknown_ops);
+        
+        println!("Client_{}:\tC:{}\tA:{}\tU:{}", self.id, self.successful_ops, self.failed_ops, self.unknown_ops);
     }    
 
     ///
@@ -155,6 +166,7 @@ impl Client {
             }
             self.send_next_operation(req, self.select_dest_node());
         }
+
 
         // wait for signal to exit
         // and then report status

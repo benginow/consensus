@@ -56,6 +56,7 @@ pub struct AppendEntries {
     //leader's commit index..
     //says which nth item this should be in the log
     pub leader_commit: usize,
+    pub current_leader_val: u64,
 }
 
 
@@ -82,8 +83,8 @@ pub struct AmendLog {
 pub struct RequestVote {
     pub term: usize,
     pub candidate_id: usize,
-    pub last_log_index: usize,
-    pub last_log_term: ClientRequest, 
+    pub last_log_index: i64,
+    pub last_log_term: Option<ClientRequest>, 
 }
 
 
