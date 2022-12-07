@@ -1,7 +1,7 @@
 extern crate serde;
 extern crate serde_json;
-use std::sync::atomic::{AtomicI32, Ordering};
 use crate::client::Client;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use self::serde_json::Value;
 
@@ -30,10 +30,6 @@ pub enum ParticipantResponse {
     UNKNOWN,
 }
 
-
-/// generator for unique ids of messages
-static COUNTER: AtomicI32 = AtomicI32::new(1);
-
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum RPC {
     Election(RequestVote),
@@ -42,13 +38,12 @@ pub enum RPC {
     RequestResp(AppendEntriesResponse),
 }
 
-
 // REMEMBER: APPEND ENTRIES IS ALSO USED FOR HEARTBEAT!
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
 pub struct AppendEntries {
     pub term: usize,
     pub leader_id: i64,
-    pub prev_log_index: i64, // -1 if log empty
+    pub prev_log_index: i64,                  // -1 if log empty
     pub prev_log_term: Option<ClientRequest>, // None if log empty
     pub entries: Option<ClientRequest>,
     // not fully necessary, but could be convenient just to interface w/
@@ -59,24 +54,21 @@ pub struct AppendEntries {
     pub current_leader_val: u64,
 }
 
-
-
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AppendEntriesResponse {
     pub term: usize,
-    // follower can return non-success in the case that 
-    pub success: bool
-
+    // follower can return non-success in the case that
+    pub success: bool,
 }
 
 // i added this, it isn't in the paper
-// if append entries response returns success=false, then 
+// if append entries response returns success=false, then
 // we want to amend the log.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AmendLog {
     //index where log should be fixed @
     n: u64,
-    entries: Vec<ClientRequest>
+    entries: Vec<ClientRequest>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,9 +76,8 @@ pub struct RequestVote {
     pub term: usize,
     pub candidate_id: usize,
     pub last_log_index: i64,
-    pub last_log_term: Option<ClientRequest>, 
+    pub last_log_term: Option<ClientRequest>,
 }
-
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RequestVoteResponse {

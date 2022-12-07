@@ -8,7 +8,6 @@ extern crate rand;
 extern crate stderrlog;
 use crate::message::RPC;
 
-use self::crossbeam_channel::select;
 use self::crossbeam_channel::{Receiver, Select, Sender};
 use client;
 use constants;
@@ -128,7 +127,9 @@ impl<'a> Participant {
         }
     }
 
-    pub fn get_p_to_p_wait_all(p_to_p_rxs: &'a Vec<Option<Receiver<message::RPC>>>) -> (Select<'a>, Vec<&Receiver<RPC>>) {
+    pub fn get_p_to_p_wait_all(
+        p_to_p_rxs: &'a Vec<Option<Receiver<message::RPC>>>,
+    ) -> (Select<'a>, Vec<&Receiver<RPC>>) {
         let mut selector = Select::new();
         let mut refs = Vec::new();
         for rx in p_to_p_rxs.iter() {
@@ -143,7 +144,9 @@ impl<'a> Participant {
         (selector, refs)
     }
 
-    pub fn get_c_to_p_wait_all(c_to_p_rxs: &'a Vec<Option<Receiver<message::PtcMessage>>>) -> (Select<'a>, Vec<&Receiver<message::PtcMessage>>) {
+    pub fn get_c_to_p_wait_all(
+        c_to_p_rxs: &'a Vec<Option<Receiver<message::PtcMessage>>>,
+    ) -> (Select<'a>, Vec<&Receiver<message::PtcMessage>>) {
         let mut selector = Select::new();
         let mut refs = Vec::new();
         for rx in c_to_p_rxs.iter() {
@@ -167,7 +170,7 @@ impl<'a> Participant {
     }
 
     pub fn get_last_log_index(&self) -> i64 {
-        return (self.local_log.len() as i64) - 1
+        return (self.local_log.len() as i64) - 1;
     }
 
     //send response to client
@@ -243,8 +246,12 @@ impl<'a> Participant {
         let mut ret_val: u64 = 0;
         for (req, _) in self.local_log.iter() {
             match req {
-                message::ClientRequest::SET(v) => { ret_val = v.clone(); },
-                message::ClientRequest::ADD(v) => { ret_val += v.clone(); },
+                message::ClientRequest::SET(v) => {
+                    ret_val = v.clone();
+                }
+                message::ClientRequest::ADD(v) => {
+                    ret_val += v.clone();
+                }
                 _ => (),
             }
         }
@@ -268,7 +275,8 @@ impl<'a> Participant {
         trace!("participant::perform_operation");
 
         let mut operation_completed = false;
-        let mut result = message::PtcMessage::ParticipantResponse(message::ParticipantResponse::ABORT);
+        let mut result =
+            message::PtcMessage::ParticipantResponse(message::ParticipantResponse::ABORT);
 
         match request {
             Some(message::PtcMessage::ClientRequest(c)) => {
@@ -276,9 +284,17 @@ impl<'a> Participant {
                     ParticipantState::Leader => {
                         //communicate with all to send request
                         match request {
-                            Some(message::PtcMessage::ClientRequest(message::ClientRequest::ADD(n))) => { self.current_value += n; }
-                            Some (message::PtcMessage::ClientRequest(message::ClientRequest::SET(n))) => { self.current_value = *n; }
-                            _ => ()
+                            Some(message::PtcMessage::ClientRequest(
+                                message::ClientRequest::ADD(n),
+                            )) => {
+                                self.current_value += n;
+                            }
+                            Some(message::PtcMessage::ClientRequest(
+                                message::ClientRequest::SET(n),
+                            )) => {
+                                self.current_value = *n;
+                            }
+                            _ => (),
                         }
 
                         for i in self.p_to_p_txs.clone() {
@@ -301,17 +317,15 @@ impl<'a> Participant {
                             }
                         }
 
-
-
                         //now, we need to wait on responses for a majority
                         let majority = self.p_to_p_rxs.len() / 2 + 1;
                         let mut num = 1;
                         while num < majority {
                             //MAKE SURE THIS TIMEOUT IS A GOOD DURATION
                             let (mut selector, refs) = Self::get_p_to_p_wait_all(&self.p_to_p_rxs);
-                            let msg = selector.select_timeout(
-                                Duration::from_millis(constants::LEADER_MAJORITY_TIMEOUT_MS),
-                            );
+                            let msg = selector.select_timeout(Duration::from_millis(
+                                constants::LEADER_MAJORITY_TIMEOUT_MS,
+                            ));
                             match msg {
                                 Ok(so) => {
                                     let sel_index = so.index();
@@ -359,7 +373,7 @@ impl<'a> Participant {
                             _ => None,
                         };
                         self.local_log.push((*c, self.current_term));
-                        
+
                         result = message::PtcMessage::ParticipantResponse(
                             message::ParticipantResponse::SUCCESS(append_to_success),
                         );
@@ -371,7 +385,7 @@ impl<'a> Participant {
                         // if leader is -1, then aborted
                         if self.leader_id == -1 {
                             result = message::PtcMessage::ParticipantResponse(
-                                message::ParticipantResponse::ABORT
+                                message::ParticipantResponse::ABORT,
                             );
                         } else {
                             result = message::PtcMessage::ParticipantResponse(
@@ -402,7 +416,7 @@ impl<'a> Participant {
             match i {
                 Some(tx) => {
                     // create RequestVote
-                    tx.send(message::RPC::Election(vote_me.clone()));
+                    tx.send(message::RPC::Election(vote_me.clone())).unwrap();
                 }
                 None => {
                     continue;
@@ -413,9 +427,8 @@ impl<'a> Participant {
         let mut num = 1;
         while num < majority {
             let (mut selector, refs) = Self::get_p_to_p_wait_all(&self.p_to_p_rxs);
-            let msg = selector.select_timeout(
-                Duration::from_millis(constants::LEADER_MAJORITY_TIMEOUT_MS),
-            );
+            let msg = selector
+                .select_timeout(Duration::from_millis(constants::LEADER_MAJORITY_TIMEOUT_MS));
             match msg {
                 Ok(index) => {
                     let indix = index.index();
@@ -424,11 +437,10 @@ impl<'a> Participant {
                         Ok(message::RPC::ElectionResp(er)) => {
                             if er.vote_granted {
                                 num += 1;
-                            }
-                            else {
+                            } else {
                                 continue;
                             }
-                        },
+                        }
                         Ok(_) => (), // TODO: double check if this should be unit?
                         Err(_) => (),
                         _ => (),
@@ -438,7 +450,6 @@ impl<'a> Participant {
                     return ParticipantState::Follower;
                 }
             }
-
         }
         // TODO: update current_term?
         return ParticipantState::Leader;
@@ -458,27 +469,36 @@ impl<'a> Participant {
             } else {
                 // OPTIMIZATION: at the beginning of every loop, wait for either leader heartbeat OR client request (so that client requests don't
                 // get held up)
-                let resp = self.p_to_p_rxs[self.leader_id as usize].clone().unwrap().recv_timeout(Duration::from_millis(constants::FOLLOWER_TIMEOUT_MS));
+                let resp = self.p_to_p_rxs[self.leader_id as usize]
+                    .clone()
+                    .unwrap()
+                    .recv_timeout(Duration::from_millis(constants::FOLLOWER_TIMEOUT_MS));
                 match resp {
                     Ok(message::RPC::Request(ae)) => {
                         received_heartbeat = true;
                         //
-                        // TODO: we must update state 
-                        if !ae.heartbeat { // must be a request for a vote on a client request if not a heartbeat
+                        // TODO: we must update state
+                        if !ae.heartbeat {
+                            // must be a request for a vote on a client request if not a heartbeat
                             let success = ae.leader_id == self.leader_id &&
                                 // ae.prev_log_index == (self.local_log.len() as i64) - 1 &&
                                 // ae.prev_log_term == self.get_prev_log_term() &&
                                 ae.term == self.current_term;
                             self.current_value = ae.current_leader_val;
-                            self.p_to_p_txs[self.leader_id as usize].clone().unwrap().send(
-                                message::RPC::RequestResp(message::AppendEntriesResponse{term: self.current_term, success})
-                            );
+                            self.p_to_p_txs[self.leader_id as usize]
+                                .clone()
+                                .unwrap()
+                                .send(message::RPC::RequestResp(message::AppendEntriesResponse {
+                                    term: self.current_term,
+                                    success,
+                                }))
+                                .unwrap();
                         }
-                    },
+                    }
                     Ok(message::RPC::Election(e)) => {
                         panic!("leader requested to be elected!!!");
-                    },
-                     _ => ()
+                    }
+                    _ => (),
                 }
             }
 
@@ -486,7 +506,6 @@ impl<'a> Participant {
                 //listen for x (random) seconds for a election request
                 //if no election request, then propose yourself :)
                 //break out and set state to candidate
-
 
                 //nop timeout because that would be unfair and add an extra layer of complexity
                 let (mut selector, refs) = Self::get_p_to_p_wait_all(&self.p_to_p_rxs);
@@ -500,14 +519,20 @@ impl<'a> Participant {
                         if chan_index >= self.id {
                             chan_index = chan_index + 1;
                         }
-                        //scary unwrap
+
                         let msg = so.recv(refs[sel_index]);
                         match msg {
                             Ok(message::RPC::Election(e)) => {
-                                let resp = message::RequestVoteResponse{term: self.current_term,
-                                                                vote_granted: e.term < self.current_term};
+                                let resp = message::RequestVoteResponse {
+                                    term: self.current_term,
+                                    vote_granted: e.term < self.current_term,
+                                };
                                 let send_resp = message::RPC::ElectionResp(resp);
-                                self.p_to_p_txs[chan_index].clone().unwrap().send(send_resp).unwrap();
+                                self.p_to_p_txs[chan_index]
+                                    .clone()
+                                    .unwrap()
+                                    .send(send_resp)
+                                    .unwrap();
                                 //dont want to handle client stuff until leader is established...?
                                 continue;
                             }
@@ -516,7 +541,9 @@ impl<'a> Participant {
                                 // ignore AppendEntries query, proceed to election (alternative: could treat this as a heartbeat and respond to leader despite it being late)
                                 return ParticipantState::Candidate;
                             }
-                            Err(_) => { return ParticipantState::Candidate; }
+                            Err(_) => {
+                                return ParticipantState::Candidate;
+                            }
                             _ => {
                                 return ParticipantState::Candidate;
                             }
@@ -533,7 +560,8 @@ impl<'a> Participant {
             // LISTEN ON CLIENTS, IF A CLIENT MISDIRECTS A MESSAGE, SEND LEADER ID
             let copied_channels = self.c_to_p_rxs.clone();
             let (mut listen_to_me, refs) = Self::get_c_to_p_wait_all(&copied_channels);
-            let msg = listen_to_me.select_timeout(Duration::from_millis(constants::FOLLOWER_TIMEOUT_MS));
+            let msg =
+                listen_to_me.select_timeout(Duration::from_millis(constants::FOLLOWER_TIMEOUT_MS));
             match msg {
                 Ok(so) => {
                     let idx = so.index();
@@ -541,7 +569,7 @@ impl<'a> Participant {
                     match msg {
                         Ok(m) => {
                             self.perform_operation(&Some(m), self.id);
-                        },
+                        }
                         Err(_) => {
                             panic!("unable to receive data from selector");
                         }
@@ -551,69 +579,9 @@ impl<'a> Participant {
                     print!("tooth");
                 }
             }
-
-            //RESPOND TO A CLIENT IF NEEDED
         }
 
         return ParticipantState::Candidate;
-        
-        // need to listen for
-        // let listen = thread::spawn(move || { 
-        //     select! (
-        //         recv(p_to_c_txs, msg, from) => {
-        //             return Leader;
-        //         }
-        //     )
-        // });
-
-        // let wait_on_heartbeat = thread::spawn(move || {
-
-        // });
-
-        //wait on heartbeats from leader
-        
-        //make this a range
-
-        // if self.leader_id == -1 {
-        //     //instead of waiting on a leader, sleep for a random amount of time
-        //     // let timer = Timeout::new(rx[0], rand_time);
-
-        //     let rand_time: u64 = rng.gen_range(0..10);
-        //     let wait_duration = time::Duration::from_millis(rand_time);
-        //     //wait on a candidate response for this duration
-        //     select! {
-        //         recv(p_to_p_rxs, msg) => {
-        //             handle_message_follower();
-        //         },
-        //         default(wait_duration) => {
-        //             //we have timed out, so we send an election response to all?
-        //             let elect_me = RequestVote::new(self.term, self.id, self.local_log.len() - 1, self.local_log[local_log.len() - 1].1);
-        //             send_all_nodes()
-        //         }
-        //     }
-        // }
-        // else {
-        //     //wait on heartbeats from leader -> if no heartbeat, return and put yourself in the candidate state
-        //     //additionally, listen for something from client.
-        //     let rand_time: u64 = rng.gen_range(0..10);
-        //     let wait_duration = time::Duration::from_millis(rand_time);
-        //     let msg = recv_timeout(p_to_p_rxs[self.leader_id], wait_duration);
-        //     match msg {
-        //         Ok(m) => {
-        //             let handled_message = handle_message(m)
-        //             //now, send the message back to the
-        //         }
-
-        //         ,
-        //         Err =>
-        //     }
-
-        // }
-
-        // let heartbeat = thread::spawn(move || {
-        //     //listen on all channels for heartbeat? ugh yikes..
-
-        // });
     }
 
     fn leader_action(&mut self) -> ParticipantState {
@@ -621,11 +589,10 @@ impl<'a> Participant {
         while self.r.load(Ordering::SeqCst) {
             // wait to receive from any of the clients (selector), with a timeout
             let c_to_p_rxs_clone = self.c_to_p_rxs.clone();
-            let (mut selector , refs) = Self::
-                get_c_to_p_wait_all(&c_to_p_rxs_clone);
+            let (mut selector, refs) = Self::get_c_to_p_wait_all(&c_to_p_rxs_clone);
             let select_res = selector.select_timeout(Duration::from_millis(
-                    constants::LEADER_CLIENT_REQ_TIMEOUT_MS,
-                ));
+                constants::LEADER_CLIENT_REQ_TIMEOUT_MS,
+            ));
             let should_send_heartbeat = match select_res {
                 Ok(op) => {
                     // received client request, so action it
@@ -634,10 +601,8 @@ impl<'a> Participant {
                         Ok(req) => {
                             self.perform_operation(&Some(req), idx);
                             false
-                        },
-                        Err(e) => {
-                            true
                         }
+                        Err(e) => true,
                     }
                 }
                 Err(e) => {
@@ -646,22 +611,23 @@ impl<'a> Participant {
                 }
             };
             if should_send_heartbeat {
-                match self.send_all_nodes_unreliable(message::RPC::Request(message::AppendEntries{
-                    term: self.current_term, 
-                    prev_log_index: self.get_last_log_index(),
-                    leader_id: self.leader_id,
-                    prev_log_term: self.get_prev_log_term(),
-                    entries: None,
-                    heartbeat: true,
-                    leader_commit: self.local_log.len(),
-                    current_leader_val: self.current_value,
-                })) {
-                    _ => continue
+                match self.send_all_nodes_unreliable(message::RPC::Request(
+                    message::AppendEntries {
+                        term: self.current_term,
+                        prev_log_index: self.get_last_log_index(),
+                        leader_id: self.leader_id,
+                        prev_log_term: self.get_prev_log_term(),
+                        entries: None,
+                        heartbeat: true,
+                        leader_commit: self.local_log.len(),
+                        current_leader_val: self.current_value,
+                    },
+                )) {
+                    _ => continue,
                 }
             }
             //here, listen for election requests
             // let () = get_p_to_p_wait_all
-
         }
         ParticipantState::Leader
     }

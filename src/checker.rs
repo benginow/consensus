@@ -1,28 +1,25 @@
-//! 
+//!
 //! checker
 //! Tools for checking output logs produced by the _T_wo _P_hase _C_ommit
 //! project in run mode. Exports a single public function called check_last_run
 //! that accepts a directory where client, participant, and coordinator log files
-//! are found, and the number of clients, participants. Loads and analyses 
-//! log files to check a handful of correctness invariants. 
-//! 
-extern crate log;
-extern crate stderrlog;
+//! are found, and the number of clients, participants. Loads and analyses
+//! log files to check a handful of correctness invariants.
+//!
 extern crate clap;
 extern crate ctrlc;
-use std::collections::HashMap;
-use oplog::OpLog;
+extern crate log;
+extern crate stderrlog;
 // use message::ProtocolMessage;
 // use message::MessageType;
-use message;
 
 ///
 /// check_participant()
-/// 
+///
 /// Given a participant name and HashMaps that represents the log files
 /// for the participant and coordinator (already filtered for commit records),
-/// check that the committed and aborted transactions are agreed upon by the two. 
-/// 
+/// check that the committed and aborted transactions are agreed upon by the two.
+///
 /// <params>
 ///     participant: name of participant (label)
 ///     ncommit: number of committed transactions from coordinator
@@ -37,7 +34,7 @@ use message;
 //     ccommitted: &HashMap<i32, ProtocolMessage>,
 //     plog: &HashMap<i32, ProtocolMessage>
 //     ) -> bool {
-    
+
 //     let mut result = true;
 //     let pcommitted = plog.iter()
 //         .filter(|e| (*e.1).mtype == MessageType::CoordinatorCommit)
@@ -71,14 +68,14 @@ use message;
 //             }
 //         }
 //         for (_k3, v3) in mlcommit.iter() {
-// 			// handle the case where the participant simply doesn't get 
-// 			// the global commit message from the coordinator. If the 
-// 			// coordinator committed the transaction, the participant 
-// 			// has to have voted in favor. 
+// 			// handle the case where the participant simply doesn't get
+// 			// the global commit message from the coordinator. If the
+// 			// coordinator committed the transaction, the participant
+// 			// has to have voted in favor.
 //             if v3.txid == txid {
 //                 foundlocaltxid += 1;
 //             }
-//         }		
+//         }
 //         result &= foundlocaltxid == 1;
 //         assert!(foundlocaltxid == 1); // exactly one commit of txid per participant
 //     }
@@ -93,56 +90,55 @@ use message;
 
 ///
 /// check_last_run()
-/// 
+///
 /// accepts a directory where client, participant, and coordinator log files
-/// are found, and the number of clients, participants. Loads and analyses 
-/// log files to check a handful of correctness invariants. 
+/// are found, and the number of clients, participants. Loads and analyses
+/// log files to check a handful of correctness invariants.
 ///
 /// <params>
 ///     n_clients: number of clients
 ///     n_requests: number of requests per client
 ///     n_participants: number of participants
-///     logpathbase: directory for client, participant, and coordinator logs 
+///     logpathbase: directory for client, participant, and coordinator logs
 ///
 pub fn check_last_run(
     n_clients: i32,
-    n_requests: i32, 
-    n_participants: usize, 
-    logpathbase: &String) {
-        // TODO
-        // info!("Checking 2PC run:  {} requests * {} clients, {} participants", 
-        //       n_requests, 
-        //       n_clients,
-        //       n_participants);
+    n_requests: i32,
+    n_participants: usize,
+    logpathbase: &String,
+) {
+    // TODO
+    // info!("Checking 2PC run:  {} requests * {} clients, {} participants",
+    //       n_requests,
+    //       n_clients,
+    //       n_participants);
 
-        // let mut logs = HashMap::new();
-        // for pid in 0..n_participants {
-        //      let pid_str = format!("participant_{}", pid);
-        //      let plogpath = format!("{}//{}.log", logpathbase, pid_str);
-        //      let plog = OpLog::from_file(plogpath);
-        //      logs.insert(pid_str, plog);
-        // }
-        // let clogpath = format!("{}{}", logpathbase, "coordinator.log");
-        // let clog = OpLog::from_file(clogpath);        
+    // let mut logs = HashMap::new();
+    // for pid in 0..n_participants {
+    //      let pid_str = format!("participant_{}", pid);
+    //      let plogpath = format!("{}//{}.log", logpathbase, pid_str);
+    //      let plog = OpLog::from_file(plogpath);
+    //      logs.insert(pid_str, plog);
+    // }
+    // let clogpath = format!("{}{}", logpathbase, "coordinator.log");
+    // let clog = OpLog::from_file(clogpath);
 
-        // let lck = clog.arc();
-        // let cmap = lck.lock().unwrap();
-        // let committed: HashMap<i32, message::ProtocolMessage> = 
-        //     cmap.iter().filter(|e| (*e.1).mtype == MessageType::CoordinatorCommit)
-        //                .map(|(k,v)| (k.clone(), v.clone()))
-        //                .collect();
-        // let aborted: HashMap<i32, message::ProtocolMessage> = 
-        //     cmap.iter().filter(|e| (*e.1).mtype == MessageType::CoordinatorAbort)
-        //                .map(|(k,v)| (k.clone(), v.clone()))
-        //                .collect();
-        // let ncommit = committed.len();
-        // let nabort = aborted.len();
+    // let lck = clog.arc();
+    // let cmap = lck.lock().unwrap();
+    // let committed: HashMap<i32, message::ProtocolMessage> =
+    //     cmap.iter().filter(|e| (*e.1).mtype == MessageType::CoordinatorCommit)
+    //                .map(|(k,v)| (k.clone(), v.clone()))
+    //                .collect();
+    // let aborted: HashMap<i32, message::ProtocolMessage> =
+    //     cmap.iter().filter(|e| (*e.1).mtype == MessageType::CoordinatorAbort)
+    //                .map(|(k,v)| (k.clone(), v.clone()))
+    //                .collect();
+    // let ncommit = committed.len();
+    // let nabort = aborted.len();
 
-        // for(p, v) in logs.iter() {
-        //     let plck = v.arc();
-        //     let plog = plck.lock().unwrap();
-        //     check_participant(p, ncommit, nabort, &committed, &plog);
-        // }
-    }
-
-
+    // for(p, v) in logs.iter() {
+    //     let plck = v.arc();
+    //     let plog = plck.lock().unwrap();
+    //     check_participant(p, ncommit, nabort, &committed, &plog);
+    // }
+}
