@@ -285,8 +285,10 @@ impl<'a> Participant {
 
         match request {
             Some(message::PtcMessage::ClientRequest(c)) => {
+                
                 match self.state {
                     ParticipantState::Leader => {
+                        print!("leader has received a request\n");
                         //communicate with all to send request
                         match request {
                             Some(message::PtcMessage::ClientRequest(
@@ -339,8 +341,10 @@ impl<'a> Participant {
                             let msg = selector.select_timeout(Duration::from_millis(
                                 constants::LEADER_MAJORITY_TIMEOUT_MS,
                             ));
+                            print!("communicating with followers\n");
                             match msg {
                                 Ok(so) => {
+                                    
                                     let sel_index = so.index();
                                     let resp = so.recv(refs[sel_index]);
                                     match resp {
@@ -358,6 +362,9 @@ impl<'a> Participant {
                                                 //prob should worry about throwing things out but... oh well
                                                 //only thing we could possibly receive is an election response, which would be weird
                                                 _ => {
+                                                    print!(
+                                                        "waiting on follower messages but the message is not an append entries response\n"
+                                                    );
                                                     continue;
                                                 }
                                             }
@@ -398,6 +405,7 @@ impl<'a> Participant {
                         // let result = message::ParticipantResponse::ABORT;
                     }
                     ParticipantState::Follower => {
+                        print!("follower has received a request\n");
                         // need to reroute to leader
                         // if leader is -1, then aborted
                         if self.leader_id == -1 {
@@ -423,6 +431,9 @@ impl<'a> Participant {
     }
 
     fn candidate_action(&mut self) -> ParticipantState {
+        print!(
+            "node {} is a candidate now\n", self.id
+        );
         let vote_me = message::RequestVote {
             term: self.current_term,
             candidate_id: self.id,
@@ -462,7 +473,7 @@ impl<'a> Participant {
                                 continue;
                             }
                         }
-                        Ok(_) => (), // TODO: double check if this should be unit?
+                        Ok(_) => {return ParticipantState::Follower;}, // TODO: double check if this should be unit?
                         Err(_) => (),
                         _ => (),
                     }
@@ -480,6 +491,9 @@ impl<'a> Participant {
 
     // this is what a follower is up to
     fn follower_action(&mut self) -> ParticipantState {
+        print!(
+            "node {} is a follower now\n", self.id
+        );
         //listens for messages from 1. leader 2. clients rxs (reroute packets to leader :))
         while self.r.load(Ordering::SeqCst) {
             //LISTEN FOR HEARTBEAT
@@ -525,6 +539,7 @@ impl<'a> Participant {
                             }
                         }
                         Ok(message::RPC::Election(e)) => {
+                            println!("reguest vote response\n");
                             let resp = message::RequestVoteResponse {
                                 term: self.current_term,
                                 vote_granted: e.term < self.current_term,
@@ -617,6 +632,7 @@ impl<'a> Participant {
                     let msg = so.recv(&refs[idx]);
                     match msg {
                         Ok(m) => {
+                            print!("calling perform operation\n");
                             self.perform_operation(&Some(m), idx);
                         }
                         Err(_) => {
@@ -634,6 +650,9 @@ impl<'a> Participant {
     }
 
     fn leader_action(&mut self) -> ParticipantState {
+        print!(
+            "node {} is a leader now\n", self.id
+        );
         //TODO: if receive an election request, no longer follower
         while self.r.load(Ordering::SeqCst) {
             // wait to receive from any of the clients (selector), with a timeout

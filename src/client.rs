@@ -117,7 +117,8 @@ impl Client {
             self.id, request_no, txid
         );
 
-        info!("client {} calling send...", self.id);
+        // info!("client {} calling send...", self.id);
+        print!("client {} calling send...\n", self.id);
         if let Err(_) = self.c_to_p_txs[dest_node]
             .clone()
             .unwrap()
@@ -129,14 +130,20 @@ impl Client {
                 message::ParticipantResponse::SUCCESS(o),
             )) => {
                 self.successful_ops = self.successful_ops + 1;
+                print!("SUCCESSFUL OPERATION\n");
                 Some(Ok(o))
             }
             Ok(message::PtcMessage::ParticipantResponse(message::ParticipantResponse::LEADER(
                 leader_id,
             ))) => {
                 if leader_id < 0 {
-                    Some(Err("leader ID was -1".into()))
+                    // Some(Err("leader ID was -1".into()));
+                    print!("resending request\n");
+                    self.send_next_operation(req.clone(), dest_node as usize)
                 } else {
+                    print!(
+                        "redirecting message\n"
+                    );
                     self.send_next_operation(req.clone(), leader_id as usize)
                 }
             }
@@ -149,7 +156,9 @@ impl Client {
                 Some(Err("received invalid message from participant".into()))
             }
             Err(e) => {
-                Some(Err(e.to_string())) // TODO: not nice
+                print!("request has timed out\n");
+                self.send_next_operation(req.clone(), dest_node as usize)
+                // Some(Err(e.to_string())) // TODO: not nice
             }
         }
     }
