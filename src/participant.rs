@@ -330,6 +330,10 @@ impl<'a> Participant {
                         let majority = self.p_to_p_rxs.len() / 2 + 1;
                         let mut num = 1;
                         while num < majority {
+                            if !self.r.load(Ordering::SeqCst) {
+                                println!("in here");
+                                return false;
+                            }
                             //MAKE SURE THIS TIMEOUT IS A GOOD DURATION
                             let (mut selector, refs) = Self::get_p_to_p_wait_all(&self.p_to_p_rxs);
                             let msg = selector.select_timeout(Duration::from_millis(
@@ -373,7 +377,7 @@ impl<'a> Participant {
                                     //make sure unwrap doesn't panic
                                     if let Err(_) = self.p_to_c_txs[client_id].clone().unwrap().send_timeout(result, Duration::from_millis(constants::RESPOND_TO_CLIENTS_TIMEOUT)) {
                                         // do nothing again? what do we even do if a client is down... idk
-                                        if DEBUG { print!("communication with clients has failed"); }
+                                        if DEBUG { print!("communication with clients has failed\n"); }
                                         ()
                                     }
                                     return false;
@@ -439,6 +443,10 @@ impl<'a> Participant {
         let majority = self.p_to_p_rxs.len() / 2 + 1;
         let mut num = 1;
         while num < majority {
+            if !self.r.load(Ordering::SeqCst) {
+                println!("in here!!!");
+                return self.state;
+            }
             let (mut selector, refs) = Self::get_p_to_p_wait_all(&self.p_to_p_rxs);
             let msg = selector
                 .select_timeout(Duration::from_millis(constants::LEADER_MAJORITY_TIMEOUT_MS));
@@ -460,59 +468,87 @@ impl<'a> Participant {
                     }
                 }
                 Err(_) => {
+                    println!("NO MESSAGE");
                     return ParticipantState::Follower;
                 }
             }
         }
         // TODO: update current_term?
+        self.leader_id = self.id as i64;
         return ParticipantState::Leader;
     }
 
     // this is what a follower is up to
     fn follower_action(&mut self) -> ParticipantState {
-        let mut rng = rand::thread_rng();
         //listens for messages from 1. leader 2. clients rxs (reroute packets to leader :))
         while self.r.load(Ordering::SeqCst) {
             //LISTEN FOR HEARTBEAT
             let mut received_heartbeat = false;
-            if self.leader_id == -1 {
-                //should be a timer to make self candidate
-                let rand_val = rng.gen_range(0..500);
-                thread::sleep(Duration::from_millis(rand_val));
+            // OPTIMIZATION: at the beginning of every loop, wait for either leader heartbeat OR client request (so that client requests don't
+            // get held up)
+            let wait_val = if self.leader_id == -1 {
+                let mut rng = rand::thread_rng();
+                rng.gen_range(0.. 500)
             } else {
-                // OPTIMIZATION: at the beginning of every loop, wait for either leader heartbeat OR client request (so that client requests don't
-                // get held up)
-                let resp = self.p_to_p_rxs[self.leader_id as usize]
-                    .clone()
-                    .unwrap()
-                    .recv_timeout(Duration::from_millis(constants::FOLLOWER_TIMEOUT_MS));
-                match resp {
-                    Ok(message::RPC::Request(ae)) => {
-                        received_heartbeat = true;
-                        //
-                        // TODO: we must update state
-                        if !ae.heartbeat {
-                            // must be a request for a vote on a client request if not a heartbeat
-                            let success = ae.leader_id == self.leader_id &&
-                                // ae.prev_log_index == (self.local_log.len() as i64) - 1 &&
-                                // ae.prev_log_term == self.get_prev_log_term() &&
-                                ae.term == self.current_term;
-                            self.current_value = ae.current_leader_val;
-                            self.p_to_p_txs[self.leader_id as usize]
+                constants::FOLLOWER_TIMEOUT_MS
+            };
+
+            let p_to_p_rxs_cloned = self.p_to_p_rxs.clone();
+            let (mut selector, refs) = Self::get_p_to_p_wait_all(&p_to_p_rxs_cloned);
+            let msg = selector.select_timeout(Duration::from_millis(wait_val));
+            match msg {
+                Ok(so) => {
+                    let idx = so.index();
+                    let data = so.recv(refs[idx]);
+                    match data {
+                        Ok(message::RPC::Request(ae)) => {
+                            println!("HEartbeat received.");
+                            received_heartbeat = true;
+                            self.leader_id = ae.leader_id;
+                            
+                            // TODO: we must update state
+                            if !ae.heartbeat {
+                                // must be a request for a vote on a client request if not a heartbeat
+                                let success = ae.leader_id == self.leader_id &&
+                                    // ae.prev_log_index == (self.local_log.len() as i64) - 1 &&
+                                    // ae.prev_log_term == self.get_prev_log_term() &&
+                                    ae.term == self.current_term;
+                                self.current_value = ae.current_leader_val;
+                                self.p_to_p_txs[self.leader_id as usize]
+                                    .clone()
+                                    .unwrap()
+                                    .send_timeout(message::RPC::RequestResp(message::AppendEntriesResponse {
+                                        term: self.current_term,
+                                        success,
+                                    }), Duration::from_millis(constants::FOLLOWER_TO_LEADER_COMM))
+                                    .unwrap();
+                            }
+                        }
+                        Ok(message::RPC::Election(e)) => {
+                            let resp = message::RequestVoteResponse {
+                                term: self.current_term,
+                                vote_granted: e.term < self.current_term,
+                            };
+                            let send_resp = message::RPC::ElectionResp(resp);
+                            let mut chan_index = idx;
+                            if chan_index >= self.id {
+                                chan_index += 1;
+                            }
+                            self.p_to_p_txs[chan_index]
                                 .clone()
                                 .unwrap()
-                                .send_timeout(message::RPC::RequestResp(message::AppendEntriesResponse {
-                                    term: self.current_term,
-                                    success,
-                                }), Duration::from_millis(constants::FOLLOWER_TO_LEADER_COMM))
+                                .send_timeout(send_resp, Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS))
                                 .unwrap();
                         }
+                        Ok(_) => {
+                            panic!("follower received invalid request");
+                        }
+                        Err(_) => {
+                            
+                        }
                     }
-                    Ok(message::RPC::Election(e)) => {
-                        panic!("leader requested to be elected!!!");
-                    }
-                    _ => (),
-                }
+                }, 
+                Err(_) => { }
             }
 
             if !received_heartbeat {
@@ -578,10 +614,10 @@ impl<'a> Participant {
             match msg {
                 Ok(so) => {
                     let idx = so.index();
-                    let msg = so.recv(&self.c_to_p_rxs[idx].clone().unwrap());
+                    let msg = so.recv(&refs[idx]);
                     match msg {
                         Ok(m) => {
-                            self.perform_operation(&Some(m), self.id);
+                            self.perform_operation(&Some(m), idx);
                         }
                         Err(_) => {
                             panic!("unable to receive data from selector");
@@ -623,6 +659,7 @@ impl<'a> Participant {
                     true
                 }
             };
+
             if should_send_heartbeat {
                 match self.send_all_nodes_unreliable(message::RPC::Request(
                     message::AppendEntries {
