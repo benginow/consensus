@@ -118,7 +118,7 @@ impl Client {
         );
 
         // info!("client {} calling send...", self.id);
-        print!("client {} calling send...\n", self.id);
+        print!("client {} calling send... to node {}\n", self.id, dest_node);
         if let Err(_) = self.c_to_p_txs[dest_node]
             .clone()
             .unwrap()
@@ -199,8 +199,14 @@ impl Client {
                     break;
                 }
                 ret_val = self.send_next_operation(req.clone(), self.select_dest_node());
+                if let Some(Ok(Some(v))) = ret_val {
+                    println!("ret val: {}", v);
+                }
             }
         }
+
+        // terminate program once all requests are done
+        self.r.store(false, Ordering::SeqCst);
 
         // wait for signal to exit
         // and then report status

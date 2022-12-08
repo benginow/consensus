@@ -1,6 +1,6 @@
 pub const LEADER_CLIENT_REQ_TIMEOUT_MS: u64 = 100;
 pub const LEADER_MAJORITY_TIMEOUT_MS: u64 = 500; // time after which leader gives up on getting a majority
-pub const FOLLOWER_TIMEOUT_MS: u64 = 1000;
+pub const FOLLOWER_TIMEOUT_MS: u64 = 2000;
 pub const LEADER_ELECTION_REQ_TIMEOUT_MS: u64 = 500; // time after which leader gives up on sending an election request to a given node
 pub const LEADER_APPEND_ENTRIES_TIMEOUT_MS: u64 = 500;
 pub const RESPOND_TO_CLIENTS_TIMEOUT: u64 = 500;

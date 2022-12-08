@@ -68,6 +68,7 @@ pub struct Participant {
     current_term: usize,
     state: ParticipantState,
     leader_id: i64,
+    voted_for: i64,
 
     //stats
     successful_ops: u64,
@@ -125,6 +126,7 @@ impl<'a> Participant {
             unsuccessful_ops: 0,
             current_value: 0,
             unknown_ops: 0,
+            voted_for: -1,
         }
     }
 
@@ -321,6 +323,7 @@ impl<'a> Participant {
                                     // I think this is the right constant in this case, but correct me if I am wrong!
                                     if let Err(_) = channel.send_timeout(message::RPC::Request(append_entry), Duration::from_millis(constants::LEADER_APPEND_ENTRIES_TIMEOUT_MS)) {
                                         // do nothing.
+                                        println!("unable to send request for majority agreement on value");
                                         ()
                                     }
                                 }
@@ -341,7 +344,7 @@ impl<'a> Participant {
                             let msg = selector.select_timeout(Duration::from_millis(
                                 constants::LEADER_MAJORITY_TIMEOUT_MS,
                             ));
-                            print!("communicating with followers\n");
+                            // print!("communicating with followers\n");
                             match msg {
                                 Ok(so) => {
                                     
@@ -351,6 +354,7 @@ impl<'a> Participant {
                                         Ok(rpc) => {
                                             match rpc {
                                                 message::RPC::RequestResp(aer) => {
+                                                    println!("node {} (current term: {}) received vote: {:?}", self.id, self.current_term, aer);
                                                     if aer.success {
                                                         num += 1;
                                                     } else {
@@ -361,9 +365,10 @@ impl<'a> Participant {
                                                 }
                                                 //prob should worry about throwing things out but... oh well
                                                 //only thing we could possibly receive is an election response, which would be weird
-                                                _ => {
+                                                r => {
                                                     print!(
-                                                        "waiting on follower messages but the message is not an append entries response\n"
+                                                        "waiting on follower messages but the message is not an append entries response {:?}\n",
+                                                        r,
                                                     );
                                                     continue;
                                                 }
@@ -376,6 +381,7 @@ impl<'a> Participant {
                                     }
                                 }
                                 Err(err) => {
+                                    println!("num is {}; majorti vote not received", num);
                                     // we couldn't get a majority, so we return false --
                                     // there may be inconsistent state
                                     result = message::PtcMessage::ParticipantResponse(
@@ -444,7 +450,9 @@ impl<'a> Participant {
             match i {
                 Some(tx) => {
                     // create RequestVote
-                    tx.send_timeout(message::RPC::Election(vote_me.clone()), Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS)).unwrap();
+                    match tx.send_timeout(message::RPC::Election(vote_me.clone()), Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS)){
+                        _ => (),
+                    }
                 }
                 None => {
                     continue;
@@ -473,36 +481,45 @@ impl<'a> Participant {
                                 continue;
                             }
                         }
-                        Ok(_) => {return ParticipantState::Follower;}, // TODO: double check if this should be unit?
+                        // JUST CHANGED THIS MAKE SURE CORRECT
+                        //TODO: respond with no vote
+                        Ok(message::RPC::Election(e)) => (),
+                        Ok(_) => {
+                            self.voted_for = -1;
+                            return ParticipantState::Follower;
+                                 }, // TODO: double check if this should be unit?
                         Err(_) => (),
                         _ => (),
                     }
                 }
                 Err(_) => {
                     println!("NO MESSAGE");
+                    self.voted_for = -1;
                     return ParticipantState::Follower;
                 }
             }
         }
         // TODO: update current_term?
         self.leader_id = self.id as i64;
+        self.current_term = self.current_term + 1;
         return ParticipantState::Leader;
     }
 
     // this is what a follower is up to
     fn follower_action(&mut self) -> ParticipantState {
-        print!(
-            "node {} is a follower now\n", self.id
-        );
+        
         //listens for messages from 1. leader 2. clients rxs (reroute packets to leader :))
         while self.r.load(Ordering::SeqCst) {
+            print!(
+                "node {} is a follower now\n", self.id
+            );
             //LISTEN FOR HEARTBEAT
             let mut received_heartbeat = false;
             // OPTIMIZATION: at the beginning of every loop, wait for either leader heartbeat OR client request (so that client requests don't
             // get held up)
             let wait_val = if self.leader_id == -1 {
                 let mut rng = rand::thread_rng();
-                rng.gen_range(0.. 500)
+                rng.gen_range(0..1000)
             } else {
                 constants::FOLLOWER_TIMEOUT_MS
             };
@@ -518,6 +535,9 @@ impl<'a> Participant {
                         Ok(message::RPC::Request(ae)) => {
                             println!("HEartbeat received.");
                             received_heartbeat = true;
+                            if ae.term > self.current_term {
+                                self.current_term = ae.term;
+                            }
                             self.leader_id = ae.leader_id;
                             
                             // TODO: we must update state
@@ -526,7 +546,7 @@ impl<'a> Participant {
                                 let success = ae.leader_id == self.leader_id &&
                                     // ae.prev_log_index == (self.local_log.len() as i64) - 1 &&
                                     // ae.prev_log_term == self.get_prev_log_term() &&
-                                    ae.term == self.current_term;
+                                    ae.term >= self.current_term;
                                 self.current_value = ae.current_leader_val;
                                 self.p_to_p_txs[self.leader_id as usize]
                                     .clone()
@@ -540,23 +560,33 @@ impl<'a> Participant {
                         }
                         Ok(message::RPC::Election(e)) => {
                             println!("reguest vote response\n");
+
+                            let vote_g = e.term <= self.current_term && (self.voted_for == -1 || self.voted_for == e.candidate_id as i64);
+                            if vote_g {
+                                self.voted_for = e.candidate_id as i64;
+                            }
+                            
                             let resp = message::RequestVoteResponse {
                                 term: self.current_term,
-                                vote_granted: e.term < self.current_term,
+                                vote_granted: vote_g,
                             };
                             let send_resp = message::RPC::ElectionResp(resp);
                             let mut chan_index = idx;
                             if chan_index >= self.id {
                                 chan_index += 1;
                             }
+                            
                             self.p_to_p_txs[chan_index]
                                 .clone()
                                 .unwrap()
                                 .send_timeout(send_resp, Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS))
                                 .unwrap();
-                        }
-                        Ok(_) => {
-                            panic!("follower received invalid request");
+                        },
+                        Ok(message::RPC::ElectionResp(_)) => {
+                            // don't panic: election response may be from when this was previously a candidat
+                        },
+                        Ok(req) => {
+                            panic!("follower received invalid request {:?}", req);
                         }
                         Err(_) => {
                             
@@ -575,7 +605,9 @@ impl<'a> Participant {
                 let (mut selector, refs) = Self::get_p_to_p_wait_all(&self.p_to_p_rxs);
                 let resp = selector.try_select();
                 self.leader_id = -1;
-                self.current_term = self.current_term + 1;
+                println!("HEART BEAT NOT RECEIVED, AHHHHH GO CRAZY!");
+                
+                self.voted_for = -1;
                 match resp {
                     Ok(so) => {
                         let sel_index = so.index();
@@ -650,11 +682,11 @@ impl<'a> Participant {
     }
 
     fn leader_action(&mut self) -> ParticipantState {
-        print!(
-            "node {} is a leader now\n", self.id
-        );
         //TODO: if receive an election request, no longer follower
         while self.r.load(Ordering::SeqCst) {
+            print!(
+                "node {} is a leader now\n", self.id
+            );
             // wait to receive from any of the clients (selector), with a timeout
             let c_to_p_rxs_clone = self.c_to_p_rxs.clone();
             let (mut selector, refs) = Self::get_c_to_p_wait_all(&c_to_p_rxs_clone);
@@ -667,6 +699,7 @@ impl<'a> Participant {
                     let idx = op.index();
                     match op.recv(refs[idx]) {
                         Ok(req) => {
+                            println!("got client request {:?}", req);
                             self.perform_operation(&Some(req), idx);
                             false
                         }
