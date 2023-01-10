@@ -1,2 +1,2 @@
 # consensus
-implementation of 2pc and paxos
+implementation of raft
