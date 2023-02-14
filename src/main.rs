@@ -4,9 +4,10 @@ extern crate clap;
 extern crate crossbeam_channel;
 extern crate ctrlc;
 extern crate stderrlog;
+extern crate shuttle;
+
 use std::convert::TryInto;
-use std::thread;
-use std::thread::JoinHandle;
+use shuttle::thread::{self, JoinHandle};
 pub mod checker;
 pub mod client;
 pub mod constants;
@@ -15,11 +16,10 @@ pub mod oplog;
 pub mod participant;
 pub mod testdata;
 pub mod tpcoptions;
-use self::crossbeam_channel::{unbounded, Receiver, Sender};
+use shuttle::crossbeam_channel::{unbounded, Receiver, Sender};
 use client::Client;
 use participant::Participant;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use shuttle::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 fn vec_from_closure<F, T>(f: F, size: usize) -> Vec<T>
 where
@@ -326,27 +326,29 @@ fn run(opts: &tpcoptions::TPCOptions) {
 /// main()
 ///
 fn main() {
-    let opts = tpcoptions::TPCOptions::new();
-    stderrlog::new()
-        .module(module_path!())
-        .quiet(false)
-        .timestamp(stderrlog::Timestamp::Millisecond)
-        .verbosity(opts.verbosity)
-        .init()
-        .unwrap();
+    shuttle::check_random(move || {
+        let opts = tpcoptions::TPCOptions::new();
+        stderrlog::new()
+            .module(module_path!())
+            .quiet(false)
+            .timestamp(stderrlog::Timestamp::Millisecond)
+            .verbosity(opts.verbosity)
+            .init()
+            .unwrap();
 
-    match opts.mode.as_ref() {
-        "run" => run(&opts),
-        "check" => checker::check_last_run(
-            opts.num_clients,
-            testdata::get_test_data(&opts.test_name)
-                .unwrap()
-                .len()
-                .try_into()
-                .unwrap(),
-            opts.num_participants,
-            &opts.logpath.to_string(),
-        ),
-        _ => panic!("unknown mode"),
-    }
+        match opts.mode.as_ref() {
+            "run" => run(&opts),
+            "check" => checker::check_last_run(
+                opts.num_clients,
+                testdata::get_test_data(&opts.test_name)
+                    .unwrap()
+                    .len()
+                    .try_into()
+                    .unwrap(),
+                opts.num_participants,
+                &opts.logpath.to_string(),
+            ),
+            _ => panic!("unknown mode"),
+        }
+    }, 1);
 }

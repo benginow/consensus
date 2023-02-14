@@ -17,7 +17,7 @@ fn get_multi_client_test(n_clients: usize) -> Vec<Vec<PtcMessage>> {
         PtcMessage::ClientRequest(GET),
     ];
     for i in 0..n_clients {
-        return_vec.push(messages.clone());
+        return_vec.push(message.clone());
     }
     return_vec
 }

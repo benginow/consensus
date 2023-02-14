@@ -3,12 +3,13 @@
 //! Implementation of 2PC participant
 //!
 extern crate crossbeam_channel;
+extern crate shuttle;
 extern crate log;
 extern crate rand;
 extern crate stderrlog;
 use crate::message::RPC;
 
-use self::crossbeam_channel::{Receiver, Select, Sender};
+use shuttle::crossbeam_channel::{Receiver, Select, Sender};
 use client;
 use constants;
 use message;
@@ -16,9 +17,7 @@ use oplog;
 use participant::rand::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicI32;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::sync::Arc;
+use shuttle::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::thread;
 use std::time;
 use std::time::Duration;
@@ -281,15 +280,14 @@ impl<'a> Participant {
     ) -> bool {
         trace!("participant::perform_operation");
 
-        let mut operation_completed = false;
-        let mut result =
-            message::PtcMessage::ParticipantResponse(message::ParticipantResponse::ABORT);
-
-        match request {
+        let (operation_completed, result) = match request {
             Some(message::PtcMessage::ClientRequest(c)) => {
-                
                 match self.state {
                     ParticipantState::Leader => {
+                        let mut operation_completed_temp= false;
+                        let mut result_temp=
+                            message::PtcMessage::ParticipantResponse(message::ParticipantResponse::ABORT);
+                        let abort_resp = message::PtcMessage::ParticipantResponse(message::ParticipantResponse::ABORT);
                         // print!("leader has received a request\n");
                         //communicate with all to send request
                         match request {
@@ -334,9 +332,8 @@ impl<'a> Participant {
                         //now, we need to wait on responses for a majority
                         let majority = self.p_to_p_rxs.len() / 2 + 1;
                         let mut num = 1;
-                        while num < majority {
+                        while num < majority { 
                             if !self.r.load(Ordering::SeqCst) {
-                                // println!("in here");
                                 return false;
                             }
                             //MAKE SURE THIS TIMEOUT IS A GOOD DURATION
@@ -384,11 +381,13 @@ impl<'a> Participant {
                                     // println!("num is {}; majorti vote not received", num);
                                     // we couldn't get a majority, so we return false --
                                     // there may be inconsistent state
-                                    result = message::PtcMessage::ParticipantResponse(
-                                        message::ParticipantResponse::ABORT,
-                                    );
                                     //make sure unwrap doesn't panic
-                                    if let Err(_) = self.p_to_c_txs[client_id].clone().unwrap().send_timeout(result, Duration::from_millis(constants::RESPOND_TO_CLIENTS_TIMEOUT)) {
+                                    // result_temp = message::PtcMessage::ParticipantResponse(
+                                    //     message::ParticipantResponse::ABORT,
+                                    // );
+                                    if let Err(_) = self.p_to_c_txs[client_id].clone().unwrap().send_timeout(message::PtcMessage::ParticipantResponse(
+                                            message::ParticipantResponse::ABORT,
+                                        ), Duration::from_millis(constants::RESPOND_TO_CLIENTS_TIMEOUT)) {
                                         // do nothing again? what do we even do if a client is down... idk
                                         if DEBUG { print!("communication with clients has failed\n"); }
                                         ()
@@ -396,44 +395,48 @@ impl<'a> Participant {
                                     return false;
                                 }
                             }
-                        }
-                        operation_completed = true;
+                        };
                         let append_to_success = match c {
                             message::ClientRequest::GET => Some(self.get_value_log()),
                             _ => None,
                         };
                         self.local_log.push((*c, self.current_term));
 
-                        result = message::PtcMessage::ParticipantResponse(
-                            message::ParticipantResponse::SUCCESS(append_to_success),
-                        );
                         //append
-                        // let result = message::ParticipantResponse::ABORT;
+                        (true, message::PtcMessage::ParticipantResponse(
+                            message::ParticipantResponse::SUCCESS(append_to_success),
+                        ))
                     }
                     ParticipantState::Follower => {
                         // print!("follower has received a request\n");
                         // need to reroute to leader
                         // if leader is -1, then aborted
                         if self.leader_id == -1 {
-                            result = message::PtcMessage::ParticipantResponse(
+                            (false, message::PtcMessage::ParticipantResponse(
                                 message::ParticipantResponse::ABORT,
-                            );
+                            ))
                         } else {
-                            result = message::PtcMessage::ParticipantResponse(
+                            (false, message::PtcMessage::ParticipantResponse(
                                 message::ParticipantResponse::LEADER(self.leader_id),
-                            );
+                            ))
                             // self.p_to_p_txs[self.leader_id].send(client_slide_rpc);
                         }
                         // wait
                     }
-                    _ => (),
-                }
-                trace!("exit participant::perform_operation");
-                self.send_client_unreliable(result, client_id);
-                return operation_completed;
+                    _ => (false, message::PtcMessage::ParticipantResponse(
+                        message::ParticipantResponse::ABORT,
+                    )),
+                }                
             }
-            _ => false,
+            _ => (false, message::PtcMessage::ParticipantResponse(
+                message::ParticipantResponse::ABORT,
+            )),
+        };
+        if operation_completed {
+            trace!("exit participant::perform_operation");
+            self.send_client_unreliable(result, client_id);
         }
+        operation_completed
     }
 
     fn candidate_action(&mut self) -> ParticipantState {
@@ -526,6 +529,7 @@ impl<'a> Participant {
 
             let p_to_p_rxs_cloned = self.p_to_p_rxs.clone();
             let (mut selector, refs) = Self::get_p_to_p_wait_all(&p_to_p_rxs_cloned);
+            println!("waiting for heartbeat from leader.");
             let msg = selector.select_timeout(Duration::from_millis(wait_val));
             match msg {
                 Ok(so) => {
@@ -605,7 +609,6 @@ impl<'a> Participant {
                 let (mut selector, refs) = Self::get_p_to_p_wait_all(&self.p_to_p_rxs);
                 let resp = selector.try_select();
                 self.leader_id = -1;
-                // println!("HEART BEAT NOT RECEIVED, AHHHHH GO CRAZY!");
                 
                 self.voted_for = -1;
                 match resp {
@@ -668,7 +671,7 @@ impl<'a> Participant {
                             self.perform_operation(&Some(m), idx);
                         }
                         Err(_) => {
-                            panic!("unable to receive data from selector");
+                            // panic!("unable to receive data from selector");
                         }
                     }
                 }
@@ -699,7 +702,7 @@ impl<'a> Participant {
                     let idx = op.index();
                     match op.recv(refs[idx]) {
                         Ok(req) => {
-                            // println!("got client request {:?}", req);
+                            println!("got client request {:?}", req);
                             self.perform_operation(&Some(req), idx);
                             false
                         }

@@ -3,17 +3,17 @@
 //! Implementation of 2PC client
 //!
 extern crate crossbeam_channel;
+extern crate shuttle;
 extern crate log;
 extern crate rand;
 extern crate stderrlog;
 use crate::constants;
 
 // use std::sync::mpsc::{Sender, Receiver};
-use self::crossbeam_channel::{Receiver, Sender};
+use shuttle::crossbeam_channel::{Receiver, Sender};
 use client::rand::prelude::*;
 use message;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::Arc;
+use shuttle::sync::{Arc, atomic::{AtomicBool, AtomicI32, Ordering}};
 use std::time::Duration;
 
 // static counter for getting unique TXID numbers
@@ -123,6 +123,7 @@ impl Client {
             .clone()
             .unwrap()
             .send_timeout(req.clone(), Duration::from_millis(constants::CLIENT_OUTGOING_REQUEST_TIMEOUT_MS)) {
+                println!("RETRYING CLIENT SEND");
             return self.send_next_operation(req, self.select_dest_node());
         }
         match self.p_to_c_rxs[dest_node].clone().unwrap().recv_timeout(Duration::from_millis(constants::CLIENT_INCOMING_RESPONSE_TIMEOUT_MS)) {
@@ -149,15 +150,16 @@ impl Client {
             }
             Ok(message::PtcMessage::ParticipantResponse(message::ParticipantResponse::ABORT)) => {
                 self.failed_ops = self.failed_ops + 1;
-                self.send_next_operation(req.clone(), dest_node)
+                print!("received abort response, trying again.\n");
+                self.send_next_operation(req.clone(), self.select_dest_node())
             }
             Ok(_) => {
                 self.unknown_ops = self.unknown_ops + 1;
                 Some(Err("received invalid message from participant".into()))
             }
             Err(e) => {
-                print!("request has timed out\n");
-                self.send_next_operation(req.clone(), dest_node as usize)
+                print!("request has timed out, trying again.\n");
+                self.send_next_operation(req.clone(), self.select_dest_node()) // select NEW destination node
                 // Some(Err(e.to_string())) // TODO: not nice
             }
         }
@@ -200,7 +202,7 @@ impl Client {
                 }
                 ret_val = self.send_next_operation(req.clone(), self.select_dest_node());
                 if let Some(Ok(Some(v))) = ret_val {
-                    println!("ret val: {}", v);
+                    println!("PARTICIPANT RETURN: {}", v);
                 }
             }
         }
