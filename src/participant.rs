@@ -23,6 +23,8 @@ use std::time;
 use std::time::Duration;
 
 static DEBUG: bool = false;
+static leader_ct: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 ///
 /// ParticipantState
 /// enum for participant 2PC state machine
@@ -747,6 +749,7 @@ impl<'a> Participant {
         trace!("Participant_{}::protocol", self.id);
 
         while self.r.load(Ordering::SeqCst) {
+            let init_state = self.state;
             match self.state {
                 ParticipantState::Leader => {
                     self.state = self.leader_action();
@@ -762,6 +765,15 @@ impl<'a> Participant {
                     continue;
                 }
             }
+
+            // Use std primitives rather than Shuttle primitives to ensure Shuttle scheduling not affected
+            if init_state != ParticipantState::Leader && self.state == ParticipantState::Leader {
+                leader_ct.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            } else if init_state == ParticipantState::Leader && self.state != ParticipantState::Leader {
+                leader_ct.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+
+            assert!(leader_ct.load(std::sync::atomic::Ordering::SeqCst) <= 1); // should never have more than one leader
         }
 
         // while self.r.load(Ordering::SeqCst) {
