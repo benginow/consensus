@@ -105,62 +105,64 @@ impl Client {
         dest_node: usize,
     ) -> Option<Result<Option<u64>, String>> {
         trace!("Client_{}::send_next_operation", self.id);
-        if !self.r.load(Ordering::SeqCst) {
-            return None;
-        }
-        // create a new request with a unique TXID.
-        let request_no: i32 = 0; // TODO--choose another number!
-        let txid = TXID_COUNTER.fetch_add(1, Ordering::SeqCst);
-
-        info!(
-            "Client {} request({})->txid:{} called",
-            self.id, request_no, txid
-        );
-
-        // info!("client {} calling send...", self.id);
-        print!("client {} calling send... to node {}\n", self.id, dest_node);
-        if let Err(_) = self.c_to_p_txs[dest_node]
-            .clone()
-            .unwrap()
-            .send_timeout(req.clone(), Duration::from_millis(constants::CLIENT_OUTGOING_REQUEST_TIMEOUT_MS)) {
-                println!("RETRYING CLIENT SEND");
-            return self.send_next_operation(req, self.select_dest_node());
-        }
-        match self.p_to_c_rxs[dest_node].clone().unwrap().recv_timeout(Duration::from_millis(constants::CLIENT_INCOMING_RESPONSE_TIMEOUT_MS)) {
-            Ok(message::PtcMessage::ParticipantResponse(
-                message::ParticipantResponse::SUCCESS(o),
-            )) => {
-                self.successful_ops = self.successful_ops + 1;
-                print!("SUCCESSFUL OPERATION\n");
-                Some(Ok(o))
+        loop {
+            if !self.r.load(Ordering::SeqCst) {
+                return None;
             }
-            Ok(message::PtcMessage::ParticipantResponse(message::ParticipantResponse::LEADER(
-                leader_id,
-            ))) => {
-                if leader_id < 0 {
-                    // Some(Err("leader ID was -1".into()));
-                    print!("resending request\n");
-                    self.send_next_operation(req.clone(), dest_node as usize)
-                } else {
-                    print!(
-                        "redirecting message\n"
-                    );
-                    self.send_next_operation(req.clone(), leader_id as usize)
+            // create a new request with a unique TXID.
+            let request_no: i32 = 0; // TODO--choose another number!
+            let txid = TXID_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+            info!(
+                "Client {} request({})->txid:{} called",
+                self.id, request_no, txid
+            );
+
+            // info!("client {} calling send...", self.id);
+            print!("client {} calling send... to node {}\n", self.id, dest_node);
+            if let Err(_) = self.c_to_p_txs[dest_node]
+                .clone()
+                .unwrap()
+                .send_timeout(req.clone(), Duration::from_millis(constants::CLIENT_OUTGOING_REQUEST_TIMEOUT_MS)) {
+                    println!("RETRYING CLIENT SEND");
+                continue
+            }
+            break match self.p_to_c_rxs[dest_node].clone().unwrap().recv_timeout(Duration::from_millis(constants::CLIENT_INCOMING_RESPONSE_TIMEOUT_MS)) {
+                Ok(message::PtcMessage::ParticipantResponse(
+                    message::ParticipantResponse::SUCCESS(o),
+                )) => {
+                    self.successful_ops = self.successful_ops + 1;
+                    print!("SUCCESSFUL OPERATION\n");
+                    Some(Ok(o))
                 }
-            }
-            Ok(message::PtcMessage::ParticipantResponse(message::ParticipantResponse::ABORT)) => {
-                self.failed_ops = self.failed_ops + 1;
-                print!("received abort response, trying again.\n");
-                self.send_next_operation(req.clone(), self.select_dest_node())
-            }
-            Ok(_) => {
-                self.unknown_ops = self.unknown_ops + 1;
-                Some(Err("received invalid message from participant".into()))
-            }
-            Err(e) => {
-                print!("request has timed out, trying again.\n");
-                self.send_next_operation(req.clone(), self.select_dest_node()) // select NEW destination node
-                // Some(Err(e.to_string())) // TODO: not nice
+                Ok(message::PtcMessage::ParticipantResponse(message::ParticipantResponse::LEADER(
+                    leader_id,
+                ))) => {
+                    if leader_id < 0 {
+                        // Some(Err("leader ID was -1".into()));
+                        print!("resending request\n");
+                        self.send_next_operation(req.clone(), dest_node as usize)
+                    } else {
+                        print!(
+                            "redirecting message\n"
+                        );
+                        self.send_next_operation(req.clone(), leader_id as usize)
+                    }
+                }
+                Ok(message::PtcMessage::ParticipantResponse(message::ParticipantResponse::ABORT)) => {
+                    self.failed_ops = self.failed_ops + 1;
+                    print!("received abort response, trying again.\n");
+                    self.send_next_operation(req.clone(), self.select_dest_node())
+                }
+                Ok(_) => {
+                    self.unknown_ops = self.unknown_ops + 1;
+                    Some(Err("received invalid message from participant".into()))
+                }
+                Err(e) => {
+                    print!("request has timed out, trying again.\n");
+                    self.send_next_operation(req.clone(), self.select_dest_node()) // select NEW destination node
+                    // Some(Err(e.to_string())) // TODO: not nice
+                }
             }
         }
     }
