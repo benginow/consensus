@@ -102,7 +102,7 @@ impl Client {
     pub fn send_next_operation(
         &mut self,
         req: message::PtcMessage,
-        dest_node: usize,
+        mut dest_node: usize,
     ) -> Option<Result<Option<u64>, String>> {
         trace!("Client_{}::send_next_operation", self.id);
         loop {
@@ -139,20 +139,20 @@ impl Client {
                     leader_id,
                 ))) => {
                     if leader_id < 0 {
-                        // Some(Err("leader ID was -1".into()));
-                        print!("resending request\n");
-                        self.send_next_operation(req.clone(), dest_node as usize)
+                        continue
                     } else {
                         print!(
                             "redirecting message\n"
                         );
-                        self.send_next_operation(req.clone(), leader_id as usize)
+                        dest_node = leader_id as usize;
+                        continue
                     }
                 }
                 Ok(message::PtcMessage::ParticipantResponse(message::ParticipantResponse::ABORT)) => {
                     self.failed_ops = self.failed_ops + 1;
                     print!("received abort response, trying again.\n");
-                    self.send_next_operation(req.clone(), self.select_dest_node())
+                    dest_node = self.select_dest_node();
+                    continue
                 }
                 Ok(_) => {
                     self.unknown_ops = self.unknown_ops + 1;
@@ -160,8 +160,8 @@ impl Client {
                 }
                 Err(e) => {
                     print!("request has timed out, trying again.\n");
-                    self.send_next_operation(req.clone(), self.select_dest_node()) // select NEW destination node
-                    // Some(Err(e.to_string())) // TODO: not nice
+                    dest_node = self.select_dest_node();
+                    continue
                 }
             }
         }
