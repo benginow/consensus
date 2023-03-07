@@ -328,8 +328,15 @@ fn run(opts: &tpcoptions::TPCOptions) {
 ///
 fn main() {
     let mut invariants = HashMap::<String, &'static (dyn Fn() -> bool + Send + Sync + 'static)>::new();
-    invariants.insert("should have at most one leader".to_string(), &(move || {
-        participant::leader_ct.load(std::sync::atomic::Ordering::SeqCst) <= 1
+    invariants.insert("should have at most one leader per term".to_string(), &(move || {
+        let leader_list = participant::leader_ct_per_term.lock().unwrap().clone(); // clone to avoid draining from the real list
+        for el in leader_list.clone() {
+            if el > 1 { // should not be more than one leader elected in a term
+                println!("{:?}", leader_list);
+                return false;
+            }
+        }
+        true
     }));
     shuttle::check_random_with_invariants(move || {
         let opts = tpcoptions::TPCOptions::new();

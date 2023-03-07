@@ -23,7 +23,7 @@ use std::time;
 use std::time::Duration;
 
 static DEBUG: bool = false;
-pub static leader_ct: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static leader_ct_per_term: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(vec![]);
 
 ///
 /// ParticipantState
@@ -574,7 +574,6 @@ impl<'a> Participant {
 
             let p_to_p_rxs_cloned = self.p_to_p_rxs.clone();
             let (mut selector, refs) = Self::get_p_to_p_wait_all(&p_to_p_rxs_cloned);
-            println!("waiting for heartbeat from leader.");
             let msg = selector.select_timeout(Duration::from_millis(wait_val));
             match msg {
                 Ok(so) => {
@@ -582,7 +581,9 @@ impl<'a> Participant {
                     let data = self.recv_unreliable_rpc(so, refs[idx]);
                     match data {
                         Ok(message::RPC::Request(ae)) => {
-                            println!("Heartbeat received.");
+                            if ae.term < self.current_term {
+                                return self.follower_action(); // discard, retry
+                            }
                             received_heartbeat = true;
                             self.leader_id = ae.leader_id;
                             
@@ -590,8 +591,6 @@ impl<'a> Participant {
                             if !ae.heartbeat {
                                 // must be a request for a vote on a client request if not a heartbeat
                                 let success = ae.leader_id == self.leader_id &&
-                                    // ae.prev_log_index == (self.local_log.len() as i64) - 1 &&
-                                    // ae.prev_log_term == self.get_prev_log_term() &&
                                     ae.term >= self.current_term;
                                 self.current_value = ae.current_leader_val;
                                 self.p_to_p_txs[self.leader_id as usize]
@@ -606,7 +605,7 @@ impl<'a> Participant {
                         }
                         Ok(message::RPC::Election(e)) => {
                             // println!("reguest vote response\n");
-                            let vote_g = e.term <= self.current_term && (self.voted_for == -1 || self.voted_for == e.candidate_id as i64);
+                            let vote_g = e.term >= self.current_term && (self.voted_for == -1 || self.voted_for == e.candidate_id as i64);
                             if vote_g {
                                 self.voted_for = e.candidate_id as i64;
                             }
@@ -645,62 +644,64 @@ impl<'a> Participant {
                 Err(_) => { }
             }
 
-            if !received_heartbeat {
-                //listen for x (random) seconds for a election request
-                //if no election request, then propose yourself :)
-                //break out and set state to candidate
+            if received_heartbeat {
+                return ParticipantState::Follower;
+            }
+            // n heartbeat, so wait for election request
+            //listen for x (random) seconds for a election request
+            //if no election request, then propose yourself :)
+            //break out and set state to candidate
 
-                //nop timeout because that would be unfair and add an extra layer of complexity
-                let (mut selector, refs) = Self::get_p_to_p_wait_all(&self.p_to_p_rxs);
-                let resp = selector.try_select();
-                self.leader_id = -1;
-                
-                self.voted_for = -1;
-                match resp {
-                    Ok(so) => {
-                        let sel_index = so.index();
-                        let mut chan_index = so.index();
-                        if chan_index >= self.id {
-                            chan_index = chan_index + 1;
+            //nop timeout because that would be unfair and add an extra layer of complexity
+            let (mut selector, refs) = Self::get_p_to_p_wait_all(&self.p_to_p_rxs);
+            let resp = selector.try_select();
+            self.leader_id = -1;
+            
+            self.voted_for = -1;
+            match resp {
+                Ok(so) => {
+                    let sel_index = so.index();
+                    let mut chan_index = so.index();
+                    if chan_index >= self.id {
+                        chan_index = chan_index + 1;
+                    }
+
+                    match self.recv_unreliable_rpc(so, refs[sel_index]) {
+                        Ok(message::RPC::Election(e)) => {
+                            let resp = message::RequestVoteResponse {
+                                term: self.current_term,
+                                vote_granted: e.term < self.current_term,
+                            };
+                            let send_resp = message::RPC::ElectionResp(resp);
+                            self.p_to_p_txs[chan_index]
+                                .clone()
+                                .unwrap()
+                                .send_timeout(send_resp, Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS))
+                                .unwrap();
+                            //dont want to handle client stuff until leader is established...?
+                            continue;
                         }
-
-                        match self.recv_unreliable_rpc(so, refs[sel_index]) {
-                            Ok(message::RPC::Election(e)) => {
-                                let resp = message::RequestVoteResponse {
-                                    term: self.current_term,
-                                    vote_granted: e.term < self.current_term,
-                                };
-                                let send_resp = message::RPC::ElectionResp(resp);
-                                self.p_to_p_txs[chan_index]
-                                    .clone()
-                                    .unwrap()
-                                    .send_timeout(send_resp, Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS))
-                                    .unwrap();
-                                //dont want to handle client stuff until leader is established...?
-                                continue;
-                            }
-                            Ok(message::RPC::Request(r)) => {
-                                //freak out
-                                // ignore AppendEntries query, proceed to election (alternative: could treat this as a heartbeat and respond to leader despite it being late)
-                                return ParticipantState::Candidate;
-                            },
-                            Err(UnreliableReceiveError::TermOutOfDate(t)) => {
-                                self.current_term = t;
-                                return ParticipantState::Follower;
-                            },
-                            Err(_) => {
-                                return ParticipantState::Candidate;
-                            }
-                            _ => {
-                                return ParticipantState::Candidate;
-                            }
+                        Ok(message::RPC::Request(r)) => {
+                            //freak out
+                            // ignore AppendEntries query, proceed to election (alternative: could treat this as a heartbeat and respond to leader despite it being late)
+                            return ParticipantState::Follower;
+                        },
+                        Err(UnreliableReceiveError::TermOutOfDate(t)) => {
+                            self.current_term = t;
+                            return ParticipantState::Follower;
+                        },
+                        Err(_) => {
+                            return ParticipantState::Candidate;
+                        }
+                        _ => {
+                            return ParticipantState::Candidate;
                         }
                     }
-                    Err(_) => {
-                        // no response
-                        // we will break and enter the candidate state
-                        break;
-                    }
+                }
+                Err(_) => {
+                    // no response
+                    // we will break and enter the candidate state
+                    break;
                 }
             }
 
@@ -876,18 +877,23 @@ impl<'a> Participant {
                 }
                 ParticipantState::Down => {
                     //TODO
-                    continue;
+                    // continue;
                 }
             }
 
             // Use std primitives rather than Shuttle primitives to ensure Shuttle scheduling not affected
             if init_state != ParticipantState::Leader && self.state == ParticipantState::Leader {
-                leader_ct.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            } else if init_state == ParticipantState::Leader && self.state != ParticipantState::Leader {
-                leader_ct.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-            }
-
-            // assert!(leader_ct.load(std::sync::atomic::Ordering::SeqCst) <= 1); // should never have more than one leader
+                let mut leaders_vec = leader_ct_per_term.lock().unwrap();
+                if self.current_term < leaders_vec.len() {
+                    leaders_vec[self.current_term] += 1;
+                } else {
+                    for _ in leaders_vec.len()..self.current_term { // pad all previous terms with 0
+                        leaders_vec.push(0);
+                    }
+                    leaders_vec.push(1);
+                }
+                println!("node {:?} became leader in term {:?}", self.id, self.current_term);
+            } 
         }
 
         // while self.r.load(Ordering::SeqCst) {
