@@ -7,7 +7,7 @@ extern crate shuttle;
 extern crate log;
 extern crate rand;
 extern crate stderrlog;
-use crate::message::{RPC, AppendEntriesResponse, ParticipantResponse};
+use crate::{message::{RPC, AppendEntriesResponse, ParticipantResponse}, participant};
 
 use shuttle::crossbeam_channel::{Receiver, Select, Sender, SelectedOperation};
 use client;
@@ -335,174 +335,152 @@ impl<'a> Participant {
         self.current_value
     }
 
+    // Messages all participants who have NOT responded yet (i.e. those who have value false in the responded_participants vec).
+    pub fn message_all_participants(&mut self, append_entries: message::AppendEntries, responded_participants: Vec<bool>) {
+        for (idx, chan)  in self.p_to_p_txs.clone().iter().enumerate() {
+            if responded_participants[idx] {
+                continue;
+            }
+
+            match chan {
+                Some(channel) => {
+                    // I think this is the right constant in this case, but correct me if I am wrong!
+                    if let Err(_) = channel.send_timeout(message::RPC::Request(append_entries), Duration::from_millis(constants::LEADER_APPEND_ENTRIES_TIMEOUT_MS)) {
+                        // do nothing.
+                        // println!("unable to send request for majority agreement on value");
+                        ()
+                    }
+                }
+                None => continue,
+            }
+        }
+    }
+
+    pub fn service_client_request_leader(&mut self, 
+        request: message::ClientRequest, 
+        client_id: usize,
+    ) -> Result<Option<message::ParticipantResponse>, UnreliableReceiveError> {
+        let result = {
+            // print!("leader has received a request\n");
+            //communicate with all to send request
+            match request {
+                message::ClientRequest::ADD(n) => {
+                    self.current_value += n;
+                }
+                message::ClientRequest::SET(n) => {
+                    self.current_value = n;
+                }
+                _ => (),
+            }
+
+            let mut responded_participants = vec![false; self.p_to_p_rxs.len()];
+
+            let append_entries = message::AppendEntries {
+                term: self.current_term,
+                leader_id: self.leader_id,
+                heartbeat: false,
+                entries: Some(request),
+                current_leader_val: self.current_value,
+            };
+
+            self.message_all_participants(append_entries, responded_participants.clone());
+
+            //now, we need to wait on responses for a majority
+            let majority = self.p_to_p_rxs.len() / 2 + 1;
+            let mut num = 1;
+            while num < majority { 
+                if !self.r.load(Ordering::SeqCst) {
+                    return Ok(None);
+                }
+                //MAKE SURE THIS TIMEOUT IS A GOOD DURATION
+                let (mut selector, refs) = Self::get_p_to_p_wait_all(&self.p_to_p_rxs);
+                let msg = selector.select_timeout(Duration::from_millis(
+                    constants::LEADER_MAJORITY_TIMEOUT_MS,
+                ));
+                // print!("communicating with followers\n");
+                match msg {
+                    Ok(so) => {
+                        
+                        let sel_index = so.index();
+                        let resp = self.recv_unreliable_rpc(so, refs[sel_index]);
+                        match resp {
+                            Ok(rpc) => {
+                                match rpc {
+                                    message::RPC::RequestResp(aer) => {
+                                        // println!("node {} (current term: {}) received vote: {:?}", self.id, self.current_term, aer);
+                                        if aer.success {
+                                            responded_participants[sel_index] = true;
+                                            num += 1;
+                                        } else {
+                                            // ignore
+                                            // in the end, should fix log
+                                            continue;
+                                        }
+                                    }
+                                    //prob should worry about throwing things out but... oh well
+                                    //only thing we could possibly receive is an election response, which would be weird
+                                    r => {
+                                        // print!(
+                                        //     "waiting on follower messages but the message is not an append entries response {:?}\n",
+                                        //     r,
+                                        // );
+                                        continue;
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                return Err(e);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        // println!("num is {}; majorti vote not received", num);
+                        // we couldn't get a majority, so we return false --
+                        // there may be inconsistent state
+                        //make sure unwrap doesn't panic
+                        // result_temp = message::PtcMessage::ParticipantResponse(
+                        //     message::ParticipantResponse::ABORT,
+                        // );
+                        if let Err(_) = self.p_to_c_txs[client_id].clone().unwrap().send_timeout(message::PtcMessage::ParticipantResponse(
+                                message::ParticipantResponse::ABORT,
+                            ), Duration::from_millis(constants::RESPOND_TO_CLIENTS_TIMEOUT)) {
+                            // do nothing again? what do we even do if a client is down... idk
+                            if DEBUG { print!("communication with clients has failed\n"); }
+                            ()
+                        }
+                        return Ok(None);
+                    }
+                }
+
+                // retry message for all participants which have NOT responded yet
+                self.message_all_participants(append_entries, responded_participants.clone());
+            };
+            let append_to_success = match request {
+                message::ClientRequest::GET => Some(self.get_value_log()),
+                _ => None,
+            };
+
+            //append
+            Some(
+                message::ParticipantResponse::SUCCESS(append_to_success)
+            )
+        };
+        Ok(result)
+    }
+    
     ///
     /// perform_operation
     /// perform the operation sent by client
     /// this is where we will do the
     /// respond to the client here
-    pub fn perform_operation(
-        &mut self,
-        request: &Option<message::PtcMessage>,
-        client_id: usize,
-    ) -> Result<bool, UnreliableReceiveError> {
+    pub fn service_client_request_follower(&self) -> Result<Option<message::ParticipantResponse>, UnreliableReceiveError> {
         trace!("participant::perform_operation");
 
-        let (operation_completed, result) = match request {
-            Some(message::PtcMessage::ClientRequest(c)) => {
-                match self.state {
-                    ParticipantState::Leader => {
-                        let mut operation_completed_temp= false;
-                        let mut result_temp=
-                            message::PtcMessage::ParticipantResponse(message::ParticipantResponse::ABORT);
-                        let abort_resp = message::PtcMessage::ParticipantResponse(message::ParticipantResponse::ABORT);
-                        // print!("leader has received a request\n");
-                        //communicate with all to send request
-                        match request {
-                            Some(message::PtcMessage::ClientRequest(
-                                message::ClientRequest::ADD(n),
-                            )) => {
-                                self.current_value += n;
-                            }
-                            Some(message::PtcMessage::ClientRequest(
-                                message::ClientRequest::SET(n),
-                            )) => {
-                                self.current_value = *n;
-                            }
-                            _ => (),
-                        }
-
-                        for i in self.p_to_p_txs.clone() {
-                            let append_entry = message::AppendEntries {
-                                term: self.current_term,
-                                leader_id: self.leader_id,
-                                prev_log_index: self.get_last_log_index(),
-                                prev_log_term: self.get_prev_log_term(),
-                                heartbeat: false,
-                                leader_commit: self.local_log.len(),
-                                entries: Some(*c),
-                                current_leader_val: self.current_value,
-                            };
-
-                            match i {
-                                Some(channel) => {
-                                    // I think this is the right constant in this case, but correct me if I am wrong!
-                                    if let Err(_) = channel.send_timeout(message::RPC::Request(append_entry), Duration::from_millis(constants::LEADER_APPEND_ENTRIES_TIMEOUT_MS)) {
-                                        // do nothing.
-                                        // println!("unable to send request for majority agreement on value");
-                                        ()
-                                    }
-                                }
-                                None => continue,
-                            }
-                        }
-
-                        //now, we need to wait on responses for a majority
-                        let majority = self.p_to_p_rxs.len() / 2 + 1;
-                        let mut num = 1;
-                        while num < majority { 
-                            if !self.r.load(Ordering::SeqCst) {
-                                return Ok(false);
-                            }
-                            //MAKE SURE THIS TIMEOUT IS A GOOD DURATION
-                            let (mut selector, refs) = Self::get_p_to_p_wait_all(&self.p_to_p_rxs);
-                            let msg = selector.select_timeout(Duration::from_millis(
-                                constants::LEADER_MAJORITY_TIMEOUT_MS,
-                            ));
-                            // print!("communicating with followers\n");
-                            match msg {
-                                Ok(so) => {
-                                    
-                                    let sel_index = so.index();
-                                    let resp = self.recv_unreliable_rpc(so, refs[sel_index]);
-                                    match resp {
-                                        Ok(rpc) => {
-                                            match rpc {
-                                                message::RPC::RequestResp(aer) => {
-                                                    // println!("node {} (current term: {}) received vote: {:?}", self.id, self.current_term, aer);
-                                                    if aer.success {
-                                                        num += 1;
-                                                    } else {
-                                                        // ignore
-                                                        // in the end, should fix log
-                                                        continue;
-                                                    }
-                                                }
-                                                //prob should worry about throwing things out but... oh well
-                                                //only thing we could possibly receive is an election response, which would be weird
-                                                r => {
-                                                    // print!(
-                                                    //     "waiting on follower messages but the message is not an append entries response {:?}\n",
-                                                    //     r,
-                                                    // );
-                                                    continue;
-                                                }
-                                            }
-                                        },
-                                        Err(e) => {
-                                            return Err(e);
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    // println!("num is {}; majorti vote not received", num);
-                                    // we couldn't get a majority, so we return false --
-                                    // there may be inconsistent state
-                                    //make sure unwrap doesn't panic
-                                    // result_temp = message::PtcMessage::ParticipantResponse(
-                                    //     message::ParticipantResponse::ABORT,
-                                    // );
-                                    if let Err(_) = self.p_to_c_txs[client_id].clone().unwrap().send_timeout(message::PtcMessage::ParticipantResponse(
-                                            message::ParticipantResponse::ABORT,
-                                        ), Duration::from_millis(constants::RESPOND_TO_CLIENTS_TIMEOUT)) {
-                                        // do nothing again? what do we even do if a client is down... idk
-                                        if DEBUG { print!("communication with clients has failed\n"); }
-                                        ()
-                                    }
-                                    return Ok(false);
-                                }
-                            }
-                        };
-                        let append_to_success = match c {
-                            message::ClientRequest::GET => Some(self.get_value_log()),
-                            _ => None,
-                        };
-                        self.local_log.push((*c, self.current_term));
-
-                        //append
-                        (true, message::PtcMessage::ParticipantResponse(
-                            message::ParticipantResponse::SUCCESS(append_to_success),
-                        ))
-                    }
-                    ParticipantState::Follower => {
-                        // print!("follower has received a request\n");
-                        // need to reroute to leader
-                        // if leader is -1, then aborted
-                        if self.leader_id == -1 {
-                            (false, message::PtcMessage::ParticipantResponse(
-                                message::ParticipantResponse::ABORT,
-                            ))
-                        } else {
-                            (false, message::PtcMessage::ParticipantResponse(
-                                message::ParticipantResponse::LEADER(self.leader_id),
-                            ))
-                            // self.p_to_p_txs[self.leader_id].send(client_slide_rpc);
-                        }
-                        // wait
-                    }
-                    _ => (false, message::PtcMessage::ParticipantResponse(
-                        message::ParticipantResponse::ABORT,
-                    )),
-                }                
-            }
-            _ => (false, message::PtcMessage::ParticipantResponse(
-                message::ParticipantResponse::ABORT,
-            )),
-        };
-        if operation_completed {
-            trace!("exit participant::perform_operation");
-            self.send_client_unreliable(result, client_id);
+        if self.leader_id == -1 {
+            Ok(Some(message::ParticipantResponse::ABORT))
+        } else {
+            Ok(Some(message::ParticipantResponse::LEADER(self.leader_id)))
         }
-        Ok(operation_completed)
     }
 
     fn candidate_action(&mut self) -> ParticipantState {
@@ -553,8 +531,9 @@ impl<'a> Participant {
                         // JUST CHANGED THIS MAKE SURE CORRECT
                         //TODO: respond with no vote
                         Ok(message::RPC::Election(e)) => (),
-                        Ok(_) => {
+                        Ok(message::RPC::Request(ae)) => {
                             self.voted_for = -1;
+                            self.leader_id = ae.leader_id;
                             return ParticipantState::Follower;
                                  }, // TODO: double check if this should be unit?
                         Err(_) => (),
@@ -603,7 +582,7 @@ impl<'a> Participant {
                     let data = self.recv_unreliable_rpc(so, refs[idx]);
                     match data {
                         Ok(message::RPC::Request(ae)) => {
-                            // println!("HEartbeat received.");
+                            println!("Heartbeat received.");
                             received_heartbeat = true;
                             self.leader_id = ae.leader_id;
                             
@@ -627,7 +606,6 @@ impl<'a> Participant {
                         }
                         Ok(message::RPC::Election(e)) => {
                             // println!("reguest vote response\n");
-
                             let vote_g = e.term <= self.current_term && (self.voted_for == -1 || self.voted_for == e.candidate_id as i64);
                             if vote_g {
                                 self.voted_for = e.candidate_id as i64;
@@ -653,7 +631,7 @@ impl<'a> Participant {
                             // don't panic: election response may be from when this was previously a candidat
                         },
                         Ok(req) => {
-                            panic!("follower received invalid request {:?}", req);
+                            println!("follower received invalid request {:?}", req);
                         }
                         Err(UnreliableReceiveError::TermOutOfDate(new_term)) => {
                             self.current_term = new_term;
@@ -738,7 +716,7 @@ impl<'a> Participant {
                     match msg {
                         Ok(m) => {
                             // print!("calling perform operation\n");
-                            match self.perform_operation(&Some(m), idx) {
+                            match self.service_client_request_follower() {
                                 Err(UnreliableReceiveError::TermOutOfDate(t)) => {
                                     self.current_term = t;
                                     return ParticipantState::Follower;
@@ -784,16 +762,28 @@ impl<'a> Participant {
                         match op.recv(c_to_p_refs[idx]) {
                             Ok(req) => {
                                 println!("leader got client request {:?}", req);
-                                match self.perform_operation(&Some(req), idx) {
-                                    Err(UnreliableReceiveError::TermOutOfDate(t)) => {
-                                        self.current_term = t;
-                                        return ParticipantState::Follower;
-                                    }, 
+                                match req {
+                                    message::PtcMessage::ClientRequest(cr) => {
+                                        match self.service_client_request_leader(cr, idx) {
+                                            Err(UnreliableReceiveError::TermOutOfDate(t)) => {
+                                                // update term. revert to follower.
+                                                self.current_term = t;
+                                                return ParticipantState::Follower;
+                                            }, 
+                                            Ok(Some(o)) => { // TODO: when would this be None?
+                                                // respond to client.
+                                                self.send_client(message::PtcMessage::ParticipantResponse(o), idx);
+                                            },
+                                            _ => {
+                                                // TODO: RecvError?
+                                            }
+                                        }
+                                        false
+                                    },
                                     _ => {
-                                        // TODO?
+                                        panic!("received participant response from client..");
                                     }
                                 }
-                                false
                             }
                             Err(e) => true,
                         }
@@ -804,8 +794,10 @@ impl<'a> Participant {
                                 println!("leader got participant request {:?}", req);
                                 match req {
                                     message::RPC::Election(rv) => {
-                                        self.leader_received_election_req_action(rv);
-                                        
+                                        if self.leader_received_election_req_action(rv) {
+                                            println!("leader voted for another node. downgrade to follower.");
+                                            return ParticipantState::Follower;
+                                        }
                                     },
                                     _ => {
                                         println!("leader should not receive append entries request.")
@@ -827,16 +819,13 @@ impl<'a> Participant {
                 }
             };
 
-            if true {
+            if should_send_heartbeat {
                 match self.send_all_nodes_unreliable(message::RPC::Request(
                     message::AppendEntries {
                         term: self.current_term,
-                        prev_log_index: self.get_last_log_index(),
                         leader_id: self.leader_id,
-                        prev_log_term: self.get_prev_log_term(),
                         entries: None,
                         heartbeat: true,
-                        leader_commit: self.local_log.len(),
                         current_leader_val: self.current_value,
                     },
                 )) {

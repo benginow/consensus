@@ -43,14 +43,11 @@ pub enum RPC {
 pub struct AppendEntries {
     pub term: usize,
     pub leader_id: i64,
-    pub prev_log_index: i64,                  // -1 if log empty
-    pub prev_log_term: Option<ClientRequest>, // None if log empty
     pub entries: Option<ClientRequest>,
     // not fully necessary, but could be convenient just to interface w/
     pub heartbeat: bool,
     //leader's commit index..
     //says which nth item this should be in the log
-    pub leader_commit: usize,
     pub current_leader_val: u64,
 }
 
