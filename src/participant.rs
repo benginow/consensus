@@ -7,7 +7,7 @@ extern crate shuttle;
 extern crate log;
 extern crate rand;
 extern crate stderrlog;
-use crate::{message::{RPC, AppendEntriesResponse, ParticipantResponse}, participant};
+use crate::{message::{RPC, AppendEntriesResponse, ParticipantResponse, PtcMessage}, participant};
 
 use shuttle::crossbeam_channel::{Receiver, Select, Sender, SelectedOperation};
 use client;
@@ -555,14 +555,12 @@ impl<'a> Participant {
 
     // this is what a follower is up to
     fn follower_action(&mut self) -> ParticipantState {
-        
         //listens for messages from 1. leader 2. clients rxs (reroute packets to leader :))
         while self.r.load(Ordering::SeqCst) {
             // print!(
             //     "node {} is a follower now\n", self.id
             // );
             //LISTEN FOR HEARTBEAT
-            let mut received_heartbeat = false;
             // OPTIMIZATION: at the beginning of every loop, wait for either leader heartbeat OR client request (so that client requests don't
             // get held up)
             let wait_val = if self.leader_id == -1 {
@@ -572,173 +570,179 @@ impl<'a> Participant {
                 constants::FOLLOWER_TIMEOUT_MS
             };
 
-            let p_to_p_rxs_cloned = self.p_to_p_rxs.clone();
-            let (mut selector, refs) = Self::get_p_to_p_wait_all(&p_to_p_rxs_cloned);
+            let cloned_c_to_p = &self.c_to_p_rxs.clone();
+            let cloned_p_to_p = &self.p_to_p_rxs.clone();
+            let (mut selector, c_refs, p_refs) = Self::get_all_to_p_wait_all(cloned_c_to_p, cloned_p_to_p);
             let msg = selector.select_timeout(Duration::from_millis(wait_val));
             match msg {
                 Ok(so) => {
-                    let idx = so.index();
-                    let data = self.recv_unreliable_rpc(so, refs[idx]);
-                    match data {
-                        Ok(message::RPC::Request(ae)) => {
-                            if ae.term < self.current_term {
-                                return self.follower_action(); // discard, retry
-                            }
-                            received_heartbeat = true;
-                            self.leader_id = ae.leader_id;
-                            
-                            // TODO: we must update state
-                            if !ae.heartbeat {
-                                // must be a request for a vote on a client request if not a heartbeat
-                                let success = ae.leader_id == self.leader_id &&
-                                    ae.term >= self.current_term;
-                                self.current_value = ae.current_leader_val;
-                                self.p_to_p_txs[self.leader_id as usize]
-                                    .clone()
-                                    .unwrap()
-                                    .send_timeout(message::RPC::RequestResp(message::AppendEntriesResponse {
-                                        term: self.current_term,
-                                        success,
-                                    }), Duration::from_millis(constants::FOLLOWER_TO_LEADER_COMM))
-                                    .unwrap();
-                            }
-                        }
-                        Ok(message::RPC::Election(e)) => {
-                            // println!("reguest vote response\n");
-                            let vote_g = e.term >= self.current_term && (self.voted_for == -1 || self.voted_for == e.candidate_id as i64);
-                            if vote_g {
-                                self.voted_for = e.candidate_id as i64;
-                            }
-                            
-                            let resp = message::RequestVoteResponse {
-                                term: self.current_term,
-                                vote_granted: vote_g,
-                            };
-                            let send_resp = message::RPC::ElectionResp(resp);
-                            let mut chan_index = idx;
-                            if chan_index >= self.id {
-                                chan_index += 1;
-                            }
-                            
-                            self.p_to_p_txs[chan_index]
-                                .clone()
-                                .unwrap()
-                                .send_timeout(send_resp, Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS))
-                                .unwrap();
-                        },
-                        Ok(message::RPC::ElectionResp(_)) => {
-                            // don't panic: election response may be from when this was previously a candidat
-                        },
-                        Ok(req) => {
-                            println!("follower received invalid request {:?}", req);
-                        }
-                        Err(UnreliableReceiveError::TermOutOfDate(new_term)) => {
-                            self.current_term = new_term;
-                            return ParticipantState::Follower; // early return: follower
-                        },
-                        Err(_) => {
-
-                        },
+                    let mut idx = so.index();
+                    if idx < self.c_to_p_rxs.len() {   // received client request
+                        self.follower_client_action(idx, so, c_refs);
+                    } else {
+                        idx -= self.c_to_p_rxs.len();
+                        self.follower_participant_action(idx, so, p_refs);
                     }
-                }, 
+                },
                 Err(_) => { }
-            }
+        }
+    }
+        ParticipantState::Follower
+    }
 
-            if received_heartbeat {
-                return ParticipantState::Follower;
-            }
-            // n heartbeat, so wait for election request
-            //listen for x (random) seconds for a election request
-            //if no election request, then propose yourself :)
-            //break out and set state to candidate
-
-            //nop timeout because that would be unfair and add an extra layer of complexity
-            let (mut selector, refs) = Self::get_p_to_p_wait_all(&self.p_to_p_rxs);
-            let resp = selector.try_select();
-            self.leader_id = -1;
-            
-            self.voted_for = -1;
-            match resp {
-                Ok(so) => {
-                    let sel_index = so.index();
-                    let mut chan_index = so.index();
-                    if chan_index >= self.id {
-                        chan_index = chan_index + 1;
-                    }
-
-                    match self.recv_unreliable_rpc(so, refs[sel_index]) {
-                        Ok(message::RPC::Election(e)) => {
-                            let resp = message::RequestVoteResponse {
-                                term: self.current_term,
-                                vote_granted: e.term < self.current_term,
-                            };
-                            let send_resp = message::RPC::ElectionResp(resp);
-                            self.p_to_p_txs[chan_index]
-                                .clone()
-                                .unwrap()
-                                .send_timeout(send_resp, Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS))
-                                .unwrap();
-                            //dont want to handle client stuff until leader is established...?
-                            continue;
-                        }
-                        Ok(message::RPC::Request(r)) => {
-                            //freak out
-                            // ignore AppendEntries query, proceed to election (alternative: could treat this as a heartbeat and respond to leader despite it being late)
-                            return ParticipantState::Follower;
-                        },
-                        Err(UnreliableReceiveError::TermOutOfDate(t)) => {
-                            self.current_term = t;
-                            return ParticipantState::Follower;
-                        },
-                        Err(_) => {
-                            return ParticipantState::Candidate;
-                        }
-                        _ => {
-                            return ParticipantState::Candidate;
-                        }
-                    }
+    fn follower_participant_action(&mut self, idx: usize, so: SelectedOperation, refs: Vec<&Receiver<RPC>>) -> ParticipantState {
+        let mut received_heartbeat = false;
+        let data = self.recv_unreliable_rpc(so, refs[idx]);
+        match data {
+            Ok(message::RPC::Request(ae)) => {
+                if ae.term < self.current_term {
+                    return ParticipantState::Follower; // discard, retry
                 }
-                Err(_) => {
-                    // no response
-                    // we will break and enter the candidate state
-                    break;
+
+                received_heartbeat = true;
+                self.leader_id = ae.leader_id;
+                
+                // TODO: we must update state
+                if !ae.heartbeat {
+                    // must be a request for a vote on a client request if not a heartbeat
+                    let success = ae.leader_id == self.leader_id &&
+                        ae.term >= self.current_term;
+                    self.current_value = ae.current_leader_val;
+                    self.p_to_p_txs[self.leader_id as usize]
+                        .clone()
+                        .unwrap()
+                        .send_timeout(message::RPC::RequestResp(message::AppendEntriesResponse {
+                            term: self.current_term,
+                            success,
+                        }), Duration::from_millis(constants::FOLLOWER_TO_LEADER_COMM))
+                        .unwrap();
                 }
             }
-
-            // LISTEN ON CLIENTS, IF A CLIENT MISDIRECTS A MESSAGE, SEND LEADER ID
-            let copied_channels = self.c_to_p_rxs.clone();
-            let (mut listen_to_me, refs) = Self::get_c_to_p_wait_all(&copied_channels);
-            let msg =
-                listen_to_me.select_timeout(Duration::from_millis(constants::FOLLOWER_TIMEOUT_MS));
-            match msg {
-                Ok(so) => {
-                    let idx = so.index();
-                    let msg = so.recv(&refs[idx]);
-                    match msg {
-                        Ok(m) => {
-                            // print!("calling perform operation\n");
-                            match self.service_client_request_follower() {
-                                Err(UnreliableReceiveError::TermOutOfDate(t)) => {
-                                    self.current_term = t;
-                                    return ParticipantState::Follower;
-                                }, 
-                                _ => {
-                                    // TODO:  
-                                },
-                            }
-                        }
-                        Err(_) => {
-                            // panic!("unable to receive data from selector");
-                        }
-                    }
+            Ok(message::RPC::Election(e)) => {
+                // println!("reguest vote response\n");
+                let vote_g = e.term >= self.current_term && (self.voted_for == -1 || self.voted_for == e.candidate_id as i64);
+                if vote_g {
+                    self.voted_for = e.candidate_id as i64;
                 }
-                Err(_) => {
-                    // print!("tooth");
+                
+                let resp = message::RequestVoteResponse {
+                    term: self.current_term,
+                    vote_granted: vote_g,
+                };
+                let send_resp = message::RPC::ElectionResp(resp);
+                let mut chan_index = idx;
+                if chan_index >= self.id {
+                    chan_index += 1;
                 }
+                
+                self.p_to_p_txs[chan_index]
+                    .clone()
+                    .unwrap()
+                    .send_timeout(send_resp, Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS))
+                    .unwrap();
+            },
+            Ok(message::RPC::ElectionResp(_)) => {
+                // don't panic: election response may be from when this was previously a candidat
+            },
+            Ok(req) => {
+                println!("follower received invalid request {:?}", req);
             }
+            Err(UnreliableReceiveError::TermOutOfDate(new_term)) => {
+                self.current_term = new_term;
+                return ParticipantState::Follower; // early return: follower
+            },
+            Err(_) => {
+
+            },
         }
 
-        return ParticipantState::Candidate;
+        if received_heartbeat {
+            return ParticipantState::Follower;
+        }
+
+        // no heartbeat, so wait for election request
+        //listen for x (random) seconds for a election request
+        //if no election request, then propose yourself :)
+        //break out and set state to candidate
+
+        //nop timeout because that would be unfair and add an extra layer of complexity
+        let (mut selector, refs) = Self::get_p_to_p_wait_all(&self.p_to_p_rxs);
+        let resp = selector.try_select();
+        self.leader_id = -1;
+
+        self.voted_for = -1;
+        match resp {
+            Ok(so) => {
+                let sel_index = so.index();
+                let mut chan_index = so.index();
+                if chan_index >= self.id {
+                    chan_index = chan_index + 1;
+                }
+
+                match self.recv_unreliable_rpc(so, refs[sel_index]) {
+                    Ok(message::RPC::Election(e)) => {
+                        let resp = message::RequestVoteResponse {
+                            term: self.current_term,
+                            vote_granted: e.term < self.current_term,
+                        };
+                        let send_resp = message::RPC::ElectionResp(resp);
+                        self.p_to_p_txs[chan_index]
+                            .clone()
+                            .unwrap()
+                            .send_timeout(send_resp, Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS))
+                            .unwrap();
+                        //dont want to handle client stuff until leader is established...?
+                        return ParticipantState::Follower;
+                    }
+                    Ok(message::RPC::Request(r)) => {
+                        //freak out
+                        // ignore AppendEntries query, proceed to election (alternative: could treat this as a heartbeat and respond to leader despite it being late)
+                        return ParticipantState::Follower;
+                    },
+                    Err(UnreliableReceiveError::TermOutOfDate(t)) => {
+                        self.current_term = t;
+                        return ParticipantState::Follower;
+                    },
+                    Err(_) => {
+                        return ParticipantState::Follower;
+                    }
+                    _ => {
+                        return ParticipantState::Follower;
+                    }
+                }
+            }
+            Err(_) => {
+                // no response
+                // we will break and enter the candidate state
+                return ParticipantState::Candidate;
+            }
+        }
+    }
+
+    fn follower_client_action(&mut self, idx: usize, so: SelectedOperation, refs: Vec<&Receiver<PtcMessage>>) -> ParticipantState {
+        // LISTEN ON CLIENTS, IF A CLIENT MISDIRECTS A MESSAGE, SEND LEADER ID
+        let msg = so.recv(&refs[idx]);
+        match msg {
+            Ok(m) => {
+                // print!("calling perform operation\n");
+                match self.service_client_request_follower() {
+                    Err(UnreliableReceiveError::TermOutOfDate(t)) => {
+                        self.current_term = t;
+                        return ParticipantState::Follower;
+                    }, 
+                    Ok(Some(pr))=> {
+                        self.send_client_unreliable(message::PtcMessage::ParticipantResponse(pr), idx);
+                    },
+                    _ => {
+
+                    }
+                }
+            }
+            Err(_) => {
+                // panic!("unable to receive data from selector");
+            }
+        }
+        return ParticipantState::Follower;
     }
 
     fn leader_action(&mut self) -> ParticipantState {
