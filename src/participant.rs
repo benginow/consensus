@@ -605,9 +605,6 @@ impl<'a> Participant {
                         Ok(message::RPC::Request(ae)) => {
                             // println!("HEartbeat received.");
                             received_heartbeat = true;
-                            if ae.term > self.current_term {
-                                self.current_term = ae.term;
-                            }
                             self.leader_id = ae.leader_id;
                             
                             // TODO: we must update state
@@ -801,7 +798,8 @@ impl<'a> Participant {
                             Err(e) => true,
                         }
                     } else { // received participant request
-                        match self.recv_unreliable_rpc(op, p_to_p_refs[idx]) {
+                        // idx represents an index in the all_to_p selector, which starts with all c_to_p channels and is followed by p_to_p channels
+                        match self.recv_unreliable_rpc(op, p_to_p_refs[idx - c_to_p_rxs_clone.len()]) {
                             Ok(req) => {
                                 println!("leader got participant request {:?}", req);
                                 match req {
@@ -829,7 +827,7 @@ impl<'a> Participant {
                 }
             };
 
-            if should_send_heartbeat {
+            if true {
                 match self.send_all_nodes_unreliable(message::RPC::Request(
                     message::AppendEntries {
                         term: self.current_term,
