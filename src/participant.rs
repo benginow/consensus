@@ -7,9 +7,9 @@ extern crate shuttle;
 extern crate log;
 extern crate rand;
 extern crate stderrlog;
-use crate::message::RPC;
+use crate::message::{RPC, AppendEntriesResponse, ParticipantResponse};
 
-use shuttle::crossbeam_channel::{Receiver, Select, Sender};
+use shuttle::crossbeam_channel::{Receiver, Select, Sender, SelectedOperation};
 use client;
 use constants;
 use message;
@@ -23,7 +23,7 @@ use std::time;
 use std::time::Duration;
 
 static DEBUG: bool = false;
-static leader_ct: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static leader_ct: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 ///
 /// ParticipantState
@@ -36,6 +36,15 @@ pub enum ParticipantState {
     Candidate,
     //mostly just used so that we can simulate a machine being down :)
     Down,
+}
+
+pub enum UnreliableReceiveError {
+    TermOutOfDate(usize),
+    RecvError,
+}
+
+pub enum PerformOperationResult {
+
 }
 
 /// Node
@@ -88,14 +97,6 @@ pub struct Participant {
 impl<'a> Participant {
     ///
     /// new()
-    ///
-    ///
-    /// HINT: you may want to pass some channels or other communication
-    ///       objects that enable coordinator->participant and participant->coordinator
-    ///       messaging to this ctor.
-    /// HINT: you may want to pass some global flags that indicate whether
-    ///       the protocol is still running to this constructor. There are other
-    ///       ways to communicate this, of course.
     ///
     pub fn new(
         i: usize,
@@ -163,6 +164,36 @@ impl<'a> Participant {
             }
         }
         (selector, refs)
+    }
+
+    /// Returns a selector to wait on either client or participant messages.
+    /// The selector stores all the client channels then all the participant channels.
+    pub fn get_all_to_p_wait_all(
+        c_to_p_rxs: &'a Vec<Option<Receiver<message::PtcMessage>>>,
+        p_to_p_rxs: &'a Vec<Option<Receiver<message::RPC>>>,
+    ) -> (Select<'a>, Vec<&'a Receiver<message::PtcMessage>>, Vec<&'a Receiver<message::RPC>>) {
+        let mut selector = Select::new();
+        let mut c_to_p_refs = Vec::new();
+        for rx in c_to_p_rxs.iter() {
+            match rx {
+                Some(rx) => {
+                    selector.recv(rx);
+                    c_to_p_refs.push(rx);
+                }
+                None => continue,
+            }
+        }
+        let mut p_to_p_refs = Vec::new();
+        for rx in p_to_p_rxs.iter() {
+            match rx {
+                Some(rx) => {
+                    selector.recv(rx);
+                    p_to_p_refs.push(rx);
+                }
+                None => continue,
+            }
+        }
+        (selector, c_to_p_refs, p_to_p_refs)
     }
 
     pub fn get_prev_log_term(&self) -> Option<message::ClientRequest> {
@@ -250,6 +281,40 @@ impl<'a> Participant {
         }
     }
 
+    // Performs an RPC for an arbitrary RPC request whilst handling the case where the given term is out of date.
+    pub fn recv_unreliable_rpc(&self, so: SelectedOperation, r: &Receiver<message::RPC>) -> Result<message::RPC, UnreliableReceiveError> 
+    {
+        let msg = so.recv(r);
+        let term = match msg {
+            Ok(message::RPC::Election(rv)) => {
+                Ok(rv.term)
+            }, 
+            Ok(message::RPC::Request(ae)) => {
+                Ok(ae.term)
+            }
+            Ok(message::RPC::ElectionResp(rvr)) => {
+                Ok(rvr.term)
+            },
+            Ok(message::RPC::RequestResp(aer)) => {
+                Ok(aer.term)
+            },
+            Err(_) => {
+                Err(UnreliableReceiveError::RecvError)
+            }
+        };
+
+        match term {
+            Ok(t) => {
+                if t > self.current_term {
+                    Err(UnreliableReceiveError::TermOutOfDate(t))
+                } else {
+                    Ok(msg.unwrap())
+                }
+            },
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn get_value_log(&mut self) -> u64 {
         let mut ret_val: u64 = 0;
         for (req, _) in self.local_log.iter() {
@@ -279,7 +344,7 @@ impl<'a> Participant {
         &mut self,
         request: &Option<message::PtcMessage>,
         client_id: usize,
-    ) -> bool {
+    ) -> Result<bool, UnreliableReceiveError> {
         trace!("participant::perform_operation");
 
         let (operation_completed, result) = match request {
@@ -336,7 +401,7 @@ impl<'a> Participant {
                         let mut num = 1;
                         while num < majority { 
                             if !self.r.load(Ordering::SeqCst) {
-                                return false;
+                                return Ok(false);
                             }
                             //MAKE SURE THIS TIMEOUT IS A GOOD DURATION
                             let (mut selector, refs) = Self::get_p_to_p_wait_all(&self.p_to_p_rxs);
@@ -348,7 +413,7 @@ impl<'a> Participant {
                                 Ok(so) => {
                                     
                                     let sel_index = so.index();
-                                    let resp = so.recv(refs[sel_index]);
+                                    let resp = self.recv_unreliable_rpc(so, refs[sel_index]);
                                     match resp {
                                         Ok(rpc) => {
                                             match rpc {
@@ -372,10 +437,9 @@ impl<'a> Participant {
                                                     continue;
                                                 }
                                             }
-                                        }
-                                        Err(_) => {
-                                            // if we are in here, we have seriously messed up again
-                                            continue;
+                                        },
+                                        Err(e) => {
+                                            return Err(e);
                                         }
                                     }
                                 }
@@ -394,7 +458,7 @@ impl<'a> Participant {
                                         if DEBUG { print!("communication with clients has failed\n"); }
                                         ()
                                     }
-                                    return false;
+                                    return Ok(false);
                                 }
                             }
                         };
@@ -438,7 +502,7 @@ impl<'a> Participant {
             trace!("exit participant::perform_operation");
             self.send_client_unreliable(result, client_id);
         }
-        operation_completed
+        Ok(operation_completed)
     }
 
     fn candidate_action(&mut self) -> ParticipantState {
@@ -536,7 +600,7 @@ impl<'a> Participant {
             match msg {
                 Ok(so) => {
                     let idx = so.index();
-                    let data = so.recv(refs[idx]);
+                    let data = self.recv_unreliable_rpc(so, refs[idx]);
                     match data {
                         Ok(message::RPC::Request(ae)) => {
                             // println!("HEartbeat received.");
@@ -594,9 +658,13 @@ impl<'a> Participant {
                         Ok(req) => {
                             panic!("follower received invalid request {:?}", req);
                         }
+                        Err(UnreliableReceiveError::TermOutOfDate(new_term)) => {
+                            self.current_term = new_term;
+                            return ParticipantState::Follower; // early return: follower
+                        },
                         Err(_) => {
-                            
-                        }
+
+                        },
                     }
                 }, 
                 Err(_) => { }
@@ -621,8 +689,7 @@ impl<'a> Participant {
                             chan_index = chan_index + 1;
                         }
 
-                        let msg = so.recv(refs[sel_index]);
-                        match msg {
+                        match self.recv_unreliable_rpc(so, refs[sel_index]) {
                             Ok(message::RPC::Election(e)) => {
                                 let resp = message::RequestVoteResponse {
                                     term: self.current_term,
@@ -641,7 +708,11 @@ impl<'a> Participant {
                                 //freak out
                                 // ignore AppendEntries query, proceed to election (alternative: could treat this as a heartbeat and respond to leader despite it being late)
                                 return ParticipantState::Candidate;
-                            }
+                            },
+                            Err(UnreliableReceiveError::TermOutOfDate(t)) => {
+                                self.current_term = t;
+                                return ParticipantState::Follower;
+                            },
                             Err(_) => {
                                 return ParticipantState::Candidate;
                             }
@@ -670,7 +741,15 @@ impl<'a> Participant {
                     match msg {
                         Ok(m) => {
                             // print!("calling perform operation\n");
-                            self.perform_operation(&Some(m), idx);
+                            match self.perform_operation(&Some(m), idx) {
+                                Err(UnreliableReceiveError::TermOutOfDate(t)) => {
+                                    self.current_term = t;
+                                    return ParticipantState::Follower;
+                                }, 
+                                _ => {
+                                    // TODO:  
+                                },
+                            }
                         }
                         Err(_) => {
                             // panic!("unable to receive data from selector");
@@ -694,21 +773,54 @@ impl<'a> Participant {
             // );
             // wait to receive from any of the clients (selector), with a timeout
             let c_to_p_rxs_clone = self.c_to_p_rxs.clone();
-            let (mut selector, refs) = Self::get_c_to_p_wait_all(&c_to_p_rxs_clone);
+            let p_to_p_rxs_clone = self.p_to_p_rxs.clone();
+
+            let (mut selector, c_to_p_refs, p_to_p_refs) = Self::get_all_to_p_wait_all(&c_to_p_rxs_clone, &p_to_p_rxs_clone);
             let select_res = selector.select_timeout(Duration::from_millis(
                 constants::LEADER_CLIENT_REQ_TIMEOUT_MS,
             ));
-            let should_send_heartbeat = match select_res {
+            let should_send_heartbeat = true; // for now: always send heartbeats
+            match select_res {
                 Ok(op) => {
-                    // received client request, so action it
                     let idx = op.index();
-                    match op.recv(refs[idx]) {
-                        Ok(req) => {
-                            println!("got client request {:?}", req);
-                            self.perform_operation(&Some(req), idx);
-                            false
+                    if idx < c_to_p_rxs_clone.len() {   // received client request
+                        match op.recv(c_to_p_refs[idx]) {
+                            Ok(req) => {
+                                println!("leader got client request {:?}", req);
+                                match self.perform_operation(&Some(req), idx) {
+                                    Err(UnreliableReceiveError::TermOutOfDate(t)) => {
+                                        self.current_term = t;
+                                        return ParticipantState::Follower;
+                                    }, 
+                                    _ => {
+                                        // TODO?
+                                    }
+                                }
+                                false
+                            }
+                            Err(e) => true,
                         }
-                        Err(e) => true,
+                    } else { // received participant request
+                        match self.recv_unreliable_rpc(op, p_to_p_refs[idx]) {
+                            Ok(req) => {
+                                println!("leader got participant request {:?}", req);
+                                match req {
+                                    message::RPC::Election(rv) => {
+                                        self.leader_received_election_req_action(rv);
+                                        
+                                    },
+                                    _ => {
+                                        println!("leader should not receive append entries request.")
+                                    },
+                                }
+                                false
+                            },
+                            Err(UnreliableReceiveError::TermOutOfDate(t)) => {
+                                self.current_term = t;
+                                return ParticipantState::Follower;
+                            },
+                            Err(_) => true,
+                        }
                     }
                 }
                 Err(e) => {
@@ -733,10 +845,25 @@ impl<'a> Participant {
                     _ => continue,
                 }
             }
-            //here, listen for election requests
-            // let () = get_p_to_p_wait_all
         }
         ParticipantState::Leader
+    }
+
+    /// If a leader receives an election request, performs the necessary actions and then returns
+    /// whether or not the action took place.
+    fn leader_received_election_req_action(&mut self, rv: message::RequestVote) -> bool {
+        let should_vote_yes = rv.term >= self.current_term && 
+            (self.voted_for == -1 || self.voted_for == rv.candidate_id as i64);
+        let vote = message::RequestVoteResponse {
+            term: self.current_term,
+            vote_granted: should_vote_yes,
+        };
+
+        self.p_to_p_txs[rv.candidate_id].clone().unwrap().send_timeout(
+            RPC::ElectionResp(vote), 
+            Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS)
+        ).unwrap();
+        should_vote_yes
     }
 
     ///
@@ -773,7 +900,7 @@ impl<'a> Participant {
                 leader_ct.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             }
 
-            assert!(leader_ct.load(std::sync::atomic::Ordering::SeqCst) <= 1); // should never have more than one leader
+            // assert!(leader_ct.load(std::sync::atomic::Ordering::SeqCst) <= 1); // should never have more than one leader
         }
 
         // while self.r.load(Ordering::SeqCst) {

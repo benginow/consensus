@@ -6,6 +6,7 @@ extern crate ctrlc;
 extern crate stderrlog;
 extern crate shuttle;
 
+use std::collections::HashMap;
 use std::convert::TryInto;
 use shuttle::thread::{self, JoinHandle};
 pub mod checker;
@@ -326,7 +327,11 @@ fn run(opts: &tpcoptions::TPCOptions) {
 /// main()
 ///
 fn main() {
-    shuttle::check_random(move || {
+    let mut invariants = HashMap::<String, &'static (dyn Fn() -> bool + Send + Sync + 'static)>::new();
+    invariants.insert("should have at most one leader".to_string(), &(move || {
+        participant::leader_ct.load(std::sync::atomic::Ordering::SeqCst) <= 1
+    }));
+    shuttle::check_random_with_invariants(move || {
         let opts = tpcoptions::TPCOptions::new();
         stderrlog::new()
             .module(module_path!())
@@ -350,5 +355,6 @@ fn main() {
             ),
             _ => panic!("unknown mode"),
         }
-    }, 1);
+    }, 1,
+    invariants);
 }
