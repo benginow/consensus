@@ -25,7 +25,6 @@ use std::time::Duration;
 static DEBUG: bool = false;
 pub static leader_ct_per_term: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(vec![]);
 // each index of outer vector represents a given term; HashMap maps from voter to list of votees in that given term
-pub static votes_delivered: std::sync::Mutex<Vec<HashMap<usize, Vec<usize>>>> = std::sync::Mutex::new(vec![]); // set up properly in main()
 
 ///
 /// ParticipantState

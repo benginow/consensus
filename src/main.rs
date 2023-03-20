@@ -19,7 +19,7 @@ pub mod testdata;
 pub mod tpcoptions;
 use shuttle::crossbeam_channel::{unbounded, Receiver, Sender};
 use client::Client;
-use participant::{Participant, votes_delivered};
+use participant::{Participant};
 use shuttle::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 fn vec_from_closure<F, T>(f: F, size: usize) -> Vec<T>
@@ -338,8 +338,7 @@ fn main() {
         let leader_list = &leader_list_guard[lower_bound..leader_list_guard.len()]; // clone to avoid draining from the real list
         for el in leader_list.clone() {
             if *el > 1 { // should not be more than one leader elected in a term
-                let votes_delivered_list = participant::votes_delivered.lock().unwrap().clone();
-                println!("{:?} {:?} {:?}", leader_list, leader_list.len() - 1, votes_delivered_list[leader_list.len() - 1]);
+                println!("{:?}", leader_list);
                 return false;
             }
         }
@@ -355,17 +354,6 @@ fn main() {
             .verbosity(opts.verbosity)
             .init()
             .unwrap();
-
-        // initialize votes_delivered array
-        let mut delivered_votes = votes_delivered.lock().unwrap();
-        for i in 0..10000 { 
-            let mut stored_map = HashMap::new();
-            for j in 0..opts.num_participants {
-                stored_map.insert(j, Vec::new());
-            }
-            delivered_votes.push(stored_map);
-        }
-        drop(delivered_votes);
 
         match opts.mode.as_ref() {
             "run" => run(&opts),
