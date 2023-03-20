@@ -182,7 +182,7 @@ impl<'a> Participant {
     pub fn set_current_term(&mut self, new_term: usize) {
         assert!(self.current_term <= new_term); // monotonic invariant
 
-        if (self.current_term != new_term) {
+        if self.current_term != new_term {
             self.voted_for = -1;
         }
         self.current_term = new_term;
@@ -567,14 +567,19 @@ impl<'a> Participant {
                         //TODO: respond with no vote
                         Ok(message::RPC::Election(e)) => (),
                         Ok(message::RPC::Request(ae)) => {
-                            self.leader_id = ae.leader_id;
-                            return ParticipantState::Follower;
+                            if ae.term >= self.current_term {
+                                // TODO: why is it possible for a new leader to emerge with smaller term than an existing candidate?
+                                self.leader_id = ae.leader_id;
+                                return ParticipantState::Follower;
+                            }
                         }, // TODO: double check if this should be unit?
                         Err(UnreliableReceiveError::TermOutOfDate(t)) => {
                             self.set_current_term(t);
                             return ParticipantState::Follower; // early return: follower
                         }
-                        Err(_) => (),
+                        Err(_) => {
+                            return ParticipantState::Candidate; // election timeout exceeded, so start new election
+                        },
                         _ => (),
                     }
                 }
@@ -650,13 +655,16 @@ impl<'a> Participant {
                         }), Duration::from_millis(constants::FOLLOWER_TO_LEADER_COMM))
                         .unwrap();
                 }
+                ParticipantState::Follower
             }
             Ok(message::RPC::Election(e)) => {
                 // println!("reguest vote response\n");
                 let vote_g = e.term >= self.current_term && (self.voted_for == -1 || self.voted_for == e.candidate_id as i64);
                 if vote_g {
                     println!("node {:?} voting for {:?} in term {:?} {:?}", self.id, e.candidate_id, self.current_term, e.term);
-                    self.voted_for = e.candidate_id as i64;
+                    if self.voted_for == -1 {
+                        self.voted_for = e.candidate_id as i64;
+                    }
                 }
                 
                 let resp = message::RequestVoteResponse {
@@ -674,79 +682,23 @@ impl<'a> Participant {
                     .unwrap()
                     .send_timeout(send_resp, Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS))
                     .unwrap();
+                
+                ParticipantState::Follower
             },
             Ok(message::RPC::ElectionResp(_)) => {
                 // don't panic: election response may be from when this was previously a candidat
+                ParticipantState::Follower
             },
             Ok(req) => {
                 println!("follower received invalid request {:?}", req);
+                ParticipantState::Follower
             }
             Err(UnreliableReceiveError::TermOutOfDate(new_term)) => {
                 self.set_current_term(new_term);
-                return ParticipantState::Follower; // early return: follower
+                ParticipantState::Follower // early return: follower
             },
             Err(_) => {
-
-            },
-        }
-
-        if received_heartbeat {
-            return ParticipantState::Follower;
-        }
-        // no heartbeat, so wait for election request
-        //listen for x (random) seconds for a election request
-        //if no election request, then propose yourself :)
-        //break out and set state to candidate
-
-        //nop timeout because that would be unfair and add an extra layer of complexity
-        let (mut selector, refs) = Self::get_p_to_p_wait_all(&self.p_to_p_rxs);
-        let resp = selector.try_select();
-        self.leader_id = -1;
-
-        match resp {
-            Ok(so) => {
-                let sel_index = so.index();
-                let mut chan_index = so.index();
-                if chan_index >= self.id {
-                    chan_index = chan_index + 1;
-                }
-
-                match self.recv_unreliable_rpc(so, refs[sel_index]) {
-                    Ok(message::RPC::Election(e)) => {
-                        let resp = message::RequestVoteResponse {
-                            term: self.current_term,
-                            vote_granted: e.term < self.current_term,
-                        };
-                        let send_resp = message::RPC::ElectionResp(resp);
-                        self.p_to_p_txs[chan_index]
-                            .clone()
-                            .unwrap()
-                            .send_timeout(send_resp, Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS))
-                            .unwrap();
-                        //dont want to handle client stuff until leader is established...?
-                        return ParticipantState::Follower;
-                    }
-                    Ok(message::RPC::Request(r)) => {
-                        //freak out
-                        // ignore AppendEntries query, proceed to election (alternative: could treat this as a heartbeat and respond to leader despite it being late)
-                        return ParticipantState::Follower;
-                    },
-                    Err(UnreliableReceiveError::TermOutOfDate(t)) => {
-                        self.set_current_term(t);
-                        return ParticipantState::Follower;
-                    },
-                    Err(_) => {
-                        return ParticipantState::Follower;
-                    }
-                    _ => {
-                        return ParticipantState::Follower;
-                    }
-                }
-            }
-            Err(_) => {
-                // no response
-                // we will break and enter the candidate state
-                return ParticipantState::Candidate;
+                ParticipantState::Candidate
             }
         }
     }
@@ -889,6 +841,11 @@ impl<'a> Participant {
             RPC::ElectionResp(vote), 
             Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS)
         ).unwrap();
+
+        if should_vote_yes {
+            self.voted_for = rv.candidate_id as i64;
+        }
+        
         should_vote_yes
     }
 
