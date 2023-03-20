@@ -138,15 +138,12 @@ impl Client {
                 Ok(message::PtcMessage::ParticipantResponse(message::ParticipantResponse::LEADER(
                     leader_id,
                 ))) => {
-                    if leader_id < 0 {
-                        continue
-                    } else {
-                        print!(
-                            "redirecting message\n"
-                        );
-                        dest_node = leader_id as usize;
-                        continue
-                    }
+                    assert!(leader_id >= 0);
+                    print!(
+                        "redirecting message\n"
+                    );
+                    dest_node = leader_id as usize;
+                    continue
                 }
                 Ok(message::PtcMessage::ParticipantResponse(message::ParticipantResponse::ABORT)) => {
                     self.failed_ops = self.failed_ops + 1;
@@ -189,8 +186,6 @@ impl Client {
     ///       exit signal before returning from the protocol method!
     ///
     pub fn protocol(&mut self, requests: Vec<message::PtcMessage>) {
-        // run the 2PC protocol for each of n_requests
-
         for req in requests {
             let mut ret_val = None;
             if !self.r.load(Ordering::SeqCst) {
