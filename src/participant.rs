@@ -567,12 +567,6 @@ impl<'a> Participant {
                                 assert!(!voting_yes_nodes.contains(&er.sender_id));
                                 // assert!(er.term <= self.current_term);
                                 voting_yes_nodes.push(er.sender_id);
-
-                                let mut delivered_votes = votes_delivered.lock().unwrap();
-                                let mut list = delivered_votes[self.current_term].get(&er.sender_id).unwrap().clone();
-                                list.push(self.id);
-                                delivered_votes[self.current_term].insert(er.sender_id, list);
-                                drop(delivered_votes);
                             } else {
                                 continue;
                             }
@@ -691,7 +685,7 @@ impl<'a> Participant {
                 // println!("reguest vote response\n");
                 let vote_g = e.term >= self.current_term && (self.voted_for == -1 || self.voted_for == e.candidate_id as i64);
                 if vote_g {
-                    println!("node {:?} voting for {:?} in term {:?} {:?}", self.id, e.candidate_id, self.current_term, e.term);
+                    // println!("node {:?} voting for {:?} in term {:?} {:?}", self.id, e.candidate_id, self.current_term, e.term);
                     if self.voted_for == -1 {
                         self.voted_for = e.candidate_id as i64;
                     }
@@ -927,7 +921,7 @@ impl<'a> Participant {
                     }
                     leaders_vec.push(1);
                 }
-                println!("node {:?} became leader in term {:?}", self.id, self.current_term);
+                // println!("node {:?} became leader in term {:?}", self.id, self.current_term);
             } 
         }
 

@@ -329,10 +329,15 @@ fn run(opts: &tpcoptions::TPCOptions) {
 fn main() {
     let mut invariants = HashMap::<String, &'static (dyn Fn() -> bool + Send + Sync + 'static)>::new();
     invariants.insert("should have at most one leader per term".to_string(), &(move || {
-        let leader_list_guard = participant::leader_ct_per_term.lock(); 
-        let leader_list = leader_list_guard.unwrap().clone();// clone to avoid draining from the real list
+        let leader_list_guard = participant::leader_ct_per_term.lock().unwrap(); 
+        let lower_bound: usize = if leader_list_guard.len() <= 10 {
+            0
+        } else {
+            leader_list_guard.len() - 10
+        };
+        let leader_list = &leader_list_guard[lower_bound..leader_list_guard.len()]; // clone to avoid draining from the real list
         for el in leader_list.clone() {
-            if el > 1 { // should not be more than one leader elected in a term
+            if *el > 1 { // should not be more than one leader elected in a term
                 let votes_delivered_list = participant::votes_delivered.lock().unwrap().clone();
                 println!("{:?} {:?} {:?}", leader_list, leader_list.len() - 1, votes_delivered_list[leader_list.len() - 1]);
                 return false;

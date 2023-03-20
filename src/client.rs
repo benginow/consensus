@@ -119,7 +119,7 @@ impl Client {
             );
 
             // info!("client {} calling send...", self.id);
-            print!("client {} calling send... to node {}\n", self.id, dest_node);
+            // print!("client {} calling send... to node {}\n", self.id, dest_node);
             if let Err(_) = self.c_to_p_txs[dest_node]
                 .clone()
                 .unwrap()
@@ -156,7 +156,7 @@ impl Client {
                     Some(Err("received invalid message from participant".into()))
                 }
                 Err(e) => {
-                    print!("request has timed out, trying again.\n");
+                    // print!("request has timed out, trying again.\n");
                     dest_node = self.select_dest_node();
                     continue
                 }
