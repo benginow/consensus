@@ -81,4 +81,5 @@ pub struct RequestVoteResponse {
     pub term: usize,
     pub vote_granted: bool,
     pub sender_id: usize,
+    pub intended_part_temp: usize,
 }

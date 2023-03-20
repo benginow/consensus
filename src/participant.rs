@@ -9,7 +9,7 @@ extern crate rand;
 extern crate stderrlog;
 use crate::{message::{RPC, AppendEntriesResponse, ParticipantResponse, PtcMessage}, participant};
 
-use shuttle::crossbeam_channel::{Receiver, Select, Sender, SelectedOperation};
+use shuttle::crossbeam_channel::{unbounded, Receiver, Select, Sender, SelectedOperation};
 use client;
 use constants;
 use message;
@@ -24,6 +24,8 @@ use std::time::Duration;
 
 static DEBUG: bool = false;
 pub static leader_ct_per_term: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(vec![]);
+// each index of outer vector represents a given term; HashMap maps from voter to list of votees in that given term
+pub static votes_delivered: std::sync::Mutex<Vec<HashMap<usize, Vec<usize>>>> = std::sync::Mutex::new(vec![]); // set up properly in main()
 
 ///
 /// ParticipantState
@@ -559,10 +561,18 @@ impl<'a> Participant {
                     let resp = self.recv_unreliable_rpc(index, refs[indix]);
                     match resp {
                         Ok(message::RPC::ElectionResp(er)) => {
-                            if er.vote_granted {
+                            assert!(self.id == er.intended_part_temp);
+                            if er.vote_granted && er.term == self.current_term {
                                 num += 1;
                                 assert!(!voting_yes_nodes.contains(&er.sender_id));
+                                // assert!(er.term <= self.current_term);
                                 voting_yes_nodes.push(er.sender_id);
+
+                                let mut delivered_votes = votes_delivered.lock().unwrap();
+                                let mut list = delivered_votes[self.current_term].get(&er.sender_id).unwrap().clone();
+                                list.push(self.id);
+                                delivered_votes[self.current_term].insert(er.sender_id, list);
+                                drop(delivered_votes);
                             } else {
                                 continue;
                             }
@@ -576,6 +586,7 @@ impl<'a> Participant {
                                 term: self.current_term,
                                 vote_granted: false,
                                 sender_id: self.id,
+                                intended_part_temp: e.candidate_id,
                             });
                             let mut chan_idx = indix;
                             if chan_idx >= self.id {
@@ -607,8 +618,10 @@ impl<'a> Participant {
             }
         }
         // TODO: update current_term?
+        assert!(num >= majority);
+        assert!(voting_yes_nodes.len() >= majority);
         self.leader_id = self.id as i64;
-        return ParticipantState::Leader;
+        ParticipantState::Leader
     }
 
     // this is what a follower is up to
@@ -683,11 +696,13 @@ impl<'a> Participant {
                         self.voted_for = e.candidate_id as i64;
                     }
                 }
+                assert!(!vote_g || e.term == self.current_term);
                 
                 let resp = message::RPC::ElectionResp(message::RequestVoteResponse {
                     term: self.current_term,
                     vote_granted: vote_g,
                     sender_id: self.id,
+                    intended_part_temp: e.candidate_id,
                 });
                 let mut chan_index = idx;
                 if chan_index >= self.id {
@@ -847,12 +862,13 @@ impl<'a> Participant {
     /// If a leader receives an election request, performs the necessary actions and then returns
     /// whether or not the action took place.
     fn leader_received_election_req_action(&mut self, rv: message::RequestVote) -> bool {
-        let should_vote_yes = rv.term >= self.current_term && 
-            (self.voted_for == -1 || self.voted_for == rv.candidate_id as i64);
+        let should_vote_yes = false; //rv.term >= self.current_term && 
+            //(self.voted_for == -1 || self.voted_for == rv.candidate_id as i64);
         let vote = message::RequestVoteResponse {
             term: self.current_term,
             vote_granted: should_vote_yes,
             sender_id: self.id,
+            intended_part_temp: rv.candidate_id,
         };
 
         self.p_to_p_txs[rv.candidate_id].clone().unwrap().send_timeout(
