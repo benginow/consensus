@@ -565,7 +565,19 @@ impl<'a> Participant {
                         }
                         // JUST CHANGED THIS MAKE SURE CORRECT
                         //TODO: respond with no vote
-                        Ok(message::RPC::Election(e)) => (),
+                        Ok(message::RPC::Election(e)) => {
+                            assert!(self.voted_for != e.candidate_id as i64);
+
+                            let resp = message::RPC::ElectionResp(message::RequestVoteResponse {
+                                term: self.current_term,
+                                vote_granted: false,
+                            });
+                            let mut chan_idx = indix;
+                            if chan_idx >= self.id {
+                                chan_idx += 1;
+                            }
+                            self.p_to_p_txs[chan_idx].clone().unwrap().send_timeout(resp, Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS)).unwrap();
+                        },
                         Ok(message::RPC::Request(ae)) => {
                             if ae.term >= self.current_term {
                                 // TODO: why is it possible for a new leader to emerge with smaller term than an existing candidate?
@@ -667,11 +679,10 @@ impl<'a> Participant {
                     }
                 }
                 
-                let resp = message::RequestVoteResponse {
+                let resp = message::RPC::ElectionResp(message::RequestVoteResponse {
                     term: self.current_term,
                     vote_granted: vote_g,
-                };
-                let send_resp = message::RPC::ElectionResp(resp);
+                });
                 let mut chan_index = idx;
                 if chan_index >= self.id {
                     chan_index += 1;
@@ -680,7 +691,7 @@ impl<'a> Participant {
                 self.p_to_p_txs[chan_index]
                     .clone()
                     .unwrap()
-                    .send_timeout(send_resp, Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS))
+                    .send_timeout(resp, Duration::from_millis(constants::LEADER_ELECTION_REQ_TIMEOUT_MS))
                     .unwrap();
                 
                 ParticipantState::Follower
@@ -845,7 +856,7 @@ impl<'a> Participant {
         if should_vote_yes {
             self.voted_for = rv.candidate_id as i64;
         }
-        
+
         should_vote_yes
     }
 
