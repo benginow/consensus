@@ -543,6 +543,8 @@ impl<'a> Participant {
         }
         let majority = self.p_to_p_rxs.len() / 2 + 1;
         let mut num = 1;
+        let mut voting_yes_nodes = Vec::new();
+        voting_yes_nodes.push(self.id);
         while num < majority {
             if !self.r.load(Ordering::SeqCst) {
                 // println!("in here!!!");
@@ -559,6 +561,8 @@ impl<'a> Participant {
                         Ok(message::RPC::ElectionResp(er)) => {
                             if er.vote_granted {
                                 num += 1;
+                                assert!(!voting_yes_nodes.contains(&er.sender_id));
+                                voting_yes_nodes.push(er.sender_id);
                             } else {
                                 continue;
                             }
@@ -571,6 +575,7 @@ impl<'a> Participant {
                             let resp = message::RPC::ElectionResp(message::RequestVoteResponse {
                                 term: self.current_term,
                                 vote_granted: false,
+                                sender_id: self.id,
                             });
                             let mut chan_idx = indix;
                             if chan_idx >= self.id {
@@ -682,6 +687,7 @@ impl<'a> Participant {
                 let resp = message::RPC::ElectionResp(message::RequestVoteResponse {
                     term: self.current_term,
                     vote_granted: vote_g,
+                    sender_id: self.id,
                 });
                 let mut chan_index = idx;
                 if chan_index >= self.id {
@@ -846,6 +852,7 @@ impl<'a> Participant {
         let vote = message::RequestVoteResponse {
             term: self.current_term,
             vote_granted: should_vote_yes,
+            sender_id: self.id,
         };
 
         self.p_to_p_txs[rv.candidate_id].clone().unwrap().send_timeout(
